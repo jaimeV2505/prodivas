@@ -1,0 +1,48 @@
+# Despliegue local:  docker compose up --build   →  http://localhost:3000
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prodiva
+      POSTGRES_PASSWORD: prodiva
+      POSTGRES_DB: prodiva
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432" # para `npm run dev` fuera de Docker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prodiva -d prodiva"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_HERO_FRAMES: ${NEXT_PUBLIC_HERO_FRAMES:-90}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3100}:3000"
+    environment:
+      DATABASE_URL: postgres://prodiva:prodiva@db:5432/prodiva
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-cambiame}
+      SESSION_SECRET: ${SESSION_SECRET:-local-dev-secret-change-me-0123456789abcdef}
+      SALON_TIMEZONE: ${SALON_TIMEZONE:-Europe/Madrid}
+      SLOT_STEP_MIN: ${SLOT_STEP_MIN:-15}
+      MIN_NOTICE_MIN: ${MIN_NOTICE_MIN:-120}
+      MAX_DAYS_AHEAD: ${MAX_DAYS_AHEAD:-60}
+      HOLD_MINUTES: ${HOLD_MINUTES:-10}
+      CANCEL_NOTICE_HOURS: ${CANCEL_NOTICE_HOURS:-24}
+      WHATSAPP_NUMBER: ${WHATSAPP_NUMBER:-34670424348}
+      OWNER_EMAIL: ${OWNER_EMAIL:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:${WEB_PORT:-3100}}
+
+volumes:
+  pgdata:
