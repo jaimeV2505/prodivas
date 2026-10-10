@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
 import { daysInMonth } from "@/lib/dates";
+import PetalBurst from "./PetalBurst";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
 
 export type Service = {
@@ -48,6 +49,7 @@ type Props = {
   address: string;
 };
 
+const EASE_OUT: [number, number, number, number] = [0.23, 1, 0.32, 1];
 const WEEK = ["L", "M", "X", "J", "V", "S", "D"];
 
 function icsHref(d: Done, address: string): string {
@@ -325,16 +327,19 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
     }
     return g;
   }, [services]);
+  const order = useMemo(() => new Map(services.map((s, i) => [s.id, i])), [services]);
   const staffName = hold?.staffName ?? (staffChoice ? staff.find((s) => s.id === staffChoice)?.name : null);
   const stepIndex = stepOrder.indexOf(step);
 
+  // Entrada 260 ms ease-out; salida más rápida (140 ms). Con "reducir movimiento" se mantiene solo el fundido.
+  // `transform` completo (no x/y) para que la animación no dependa del hilo principal.
   const motionProps = reduce
-    ? {}
+    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 }, transition: { duration: 0.15 } }
     : {
-        initial: { opacity: 0, x: 28 },
-        animate: { opacity: 1, x: 0 },
-        exit: { opacity: 0, x: -28 },
-        transition: { duration: 0.28, ease: [0.2, 0.8, 0.2, 1] as [number, number, number, number] },
+        initial: { opacity: 0, transform: "translateX(24px)" },
+        animate: { opacity: 1, transform: "translateX(0px)" },
+        exit: { opacity: 0, transform: "translateX(-16px)", transition: { duration: 0.14, ease: EASE_OUT } },
+        transition: { duration: 0.26, ease: EASE_OUT },
       };
 
   // Función (no componente) para que los botones no se remonten en cada tic de la cuenta atrás
@@ -348,7 +353,7 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
             const mine = hold?.startsAt === s.startsAt;
             const taken = !s.available && !mine;
             return (
-              <motion.button
+              <button
                 key={s.startsAt}
                 type="button"
                 className={`slot ${mine ? "slot--mine" : ""} ${taken ? "slot--taken" : ""}`}
@@ -356,21 +361,20 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                 aria-pressed={mine}
                 aria-label={taken ? `${s.time}, ocupado` : mine ? `${s.time}, bloqueado para ti` : s.time}
                 onClick={() => void pickSlot(s)}
-                whileTap={reduce || taken ? undefined : { scale: 0.93 }}
               >
                 {mine && (
                   <motion.span
                     className="slot__lock"
-                    initial={reduce ? false : { scale: 0, rotate: -35 }}
-                    animate={{ scale: 1, rotate: 0 }}
-                    transition={{ type: "spring", stiffness: 520, damping: 16 }}
+                    initial={reduce ? false : { opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ type: "spring", duration: 0.35, bounce: 0.2 }}
                   >
                     <Lock size={13} aria-hidden="true" />
                   </motion.span>
                 )}
                 {taken && <Lock size={12} aria-hidden="true" className="slot__lock--taken" />}
                 {s.time}
-              </motion.button>
+              </button>
             );
           })}
         </div>
@@ -410,7 +414,7 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                     <ul className="pick-list">
                       {g.items.map((s) => (
                         <li key={s.id}>
-                          <button type="button" className={`pick ${service?.id === s.id ? "is-on" : ""}`} onClick={() => chooseService(s)}>
+                          <button type="button" className={`pick ${service?.id === s.id ? "is-on" : ""}`} style={{ ["--i" as string]: Math.min(order.get(s.id) ?? 0, 6) } as React.CSSProperties} onClick={() => chooseService(s)}>
                             <span className="pick__main">
                               <strong>{s.name}</strong>
                               {s.description && <small>{s.description}</small>}
@@ -494,7 +498,6 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                           aria-pressed={sel}
                           onClick={() => setDay(ds)}
                         >
-                          {sel && !reduce && <motion.span layoutId="calSel" className="cal__sel" transition={{ type: "spring", stiffness: 420, damping: 32 }} />}
                           <span className="cal__n">{i + 1}</span>
                         </button>
                       );
@@ -521,9 +524,10 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                   {hold && (
                     <motion.div
                       className="holdbar"
-                      initial={reduce ? false : { opacity: 0, y: 14 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={reduce ? undefined : { opacity: 0, y: 14 }}
+                      initial={reduce ? { opacity: 0 } : { opacity: 0, transform: "translateY(12px)" }}
+                      animate={reduce ? { opacity: 1 } : { opacity: 1, transform: "translateY(0px)" }}
+                      exit={reduce ? { opacity: 0 } : { opacity: 0, transform: "translateY(8px)", transition: { duration: 0.14, ease: EASE_OUT } }}
+                      transition={{ duration: 0.24, ease: EASE_OUT }}
                     >
                       <div className="holdbar__row">
                         <span className="holdbar__icon"><Lock size={18} aria-hidden="true" /></span>
@@ -586,15 +590,16 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
             {/* ---------------- LISTO ---------------- */}
             {step === "done" && done && (
               <div className="done">
+                <PetalBurst />
                 <motion.svg
                   className="done__check"
                   viewBox="0 0 64 64"
                   width="84"
                   height="84"
                   aria-hidden="true"
-                  initial={reduce ? false : { scale: 0.6, opacity: 0 }}
+                  initial={reduce ? false : { scale: 0.85, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: "spring", stiffness: 260, damping: 16 }}
+                  transition={{ type: "spring", duration: 0.5, bounce: 0.2 }}
                 >
                   <circle cx="32" cy="32" r="30" fill="var(--magenta)" />
                   <motion.path

@@ -23,7 +23,7 @@ unzip prodiva-booking.zip && cd prodiva-booking   # unzip en terminal: conserva 
 cp .env.example .env                               # pon ADMIN_PASSWORD y SESSION_SECRET
 docker compose up --build
 ```
-- Web: http://localhost:3000 · Reservas: http://localhost:3000/reservar · Agenda: http://localhost:3000/admin
+- Web: http://localhost:3100 · Reservas: http://localhost:3100/reservar · Agenda: http://localhost:3100/admin (puerto configurable con `WEB_PORT`)
 - La primera vez se crea el esquema y se cargan servicios y horarios de ejemplo.
 
 Desarrollo con recarga en caliente:
@@ -65,4 +65,4 @@ Reglas del salón (paso de los huecos, preaviso, días máximos, duración del b
 - Todas las profesionales comparten el mismo horario (el horario individual sería una tabla más).
 - Los servicios y horarios se editan por SQL; una pantalla en `/admin` es el siguiente paso natural.
 - No hay pagos ni señal online (se puede añadir con Stripe).
-- Animaciones de Higgsfield: ver `HIGGSFIELD.md`.
+- Vídeos y animaciones: la web trae 7 ranuras de vídeo (hero, 3 paneles de servicios, 3 reels) con fondo animado de respaldo. Ver `HIGGSFIELD.md`.

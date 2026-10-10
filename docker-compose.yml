@@ -1,4 +1,4 @@
-# Despliegue local:  docker compose up --build   →  http://localhost:3000
+# Despliegue local:  docker compose up --build   →  http://localhost:3100 (cambia WEB_PORT en .env)
 services:
   db:
     image: postgres:16-alpine

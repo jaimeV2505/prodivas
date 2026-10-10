@@ -1,58 +1,56 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion, useScroll, useTransform } from "framer-motion";
+import Art from "./Art";
+import Magnetic from "./Magnetic";
 import Petals from "./Petals";
+import RotatingBadge from "./RotatingBadge";
+import TransitionLink from "./TransitionLink";
+import Link from "next/link";
 
 const FRAME_COUNT = Number(process.env.NEXT_PUBLIC_HERO_FRAMES ?? 90);
 const frameSrc = (i: number) => `/frames/frame_${String(i).padStart(4, "0")}.webp`;
-
 const WORDS = ["Tu", "cita", "en", "Pro", "Diva,", "sin", "llamar."];
 
-function HeroCopy({ animate }: { animate: boolean }) {
+function HeroCopy() {
   return (
     <>
       <h1 className="hero__title" aria-label={WORDS.join(" ")}>
         {WORDS.map((w, i) => (
           <span className="hero__word" key={i} aria-hidden="true">
-            <motion.span
-              initial={animate ? { y: "110%" } : false}
-              animate={{ y: 0 }}
-              transition={{ duration: 0.7, delay: 0.15 + i * 0.07, ease: [0.2, 0.8, 0.2, 1] }}
-            >
-              {w}
-            </motion.span>
+            <span style={{ ["--i" as string]: i } as React.CSSProperties}>{w}</span>
           </span>
         ))}
       </h1>
-      <motion.p
-        className="hero__lead"
-        initial={animate ? { opacity: 0, y: 12 } : false}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.9, duration: 0.6 }}
-      >
+      <p className="hero__lead">
         Manicura, pedicura, pestañas, depilación y microblading en Melide. Elige servicio y hueco:
         queda bloqueado para ti mientras reservas.
-      </motion.p>
-      <motion.div
-        className="hero__cta"
-        initial={animate ? { opacity: 0, y: 12 } : false}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 1.05, duration: 0.6 }}
-      >
-        <Link href="/reservar" className="btn btn--primary btn--lg">Reservar cita</Link>
+      </p>
+      <div className="hero__cta">
+        <Magnetic>
+          <TransitionLink href="/reservar" className="btn btn--primary btn--lg">Reservar cita</TransitionLink>
+        </Magnetic>
         <Link href="/#servicios" className="btn btn--ghost btn--lg">Ver servicios y precios</Link>
-      </motion.div>
+      </div>
     </>
   );
 }
 
+type Mode = "probe" | "frames" | "video" | "static";
+
+/**
+ * Hero con tres niveles, del más rico al más sencillo:
+ *  1. /public/frames/frame_0001.webp...  → el vídeo avanza con el scroll
+ *  2. /public/videos/hero.mp4            → vídeo de fondo en bucle
+ *  3. nada                               → fondo animado con pétalos
+ */
 export default function ScrollHero() {
   const reduce = useReducedMotion();
   const sectionRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [mode, setMode] = useState<"probe" | "frames" | "static">("probe");
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [mode, setMode] = useState<Mode>("probe");
 
   const { scrollYProgress } = useScroll({ target: sectionRef, offset: ["start start", "end end"] });
   const introOpacity = useTransform(scrollYProgress, [0, 0.2], [1, 0]);
@@ -60,23 +58,26 @@ export default function ScrollHero() {
   const outroOpacity = useTransform(scrollYProgress, [0.62, 0.84], [0, 1]);
   const outroY = useTransform(scrollYProgress, [0.62, 0.84], [40, 0]);
 
-  // ¿Hay fotogramas generados en /public/frames? Si no, hero estático con pétalos.
   useEffect(() => {
     if (reduce) {
       setMode("static");
       return;
     }
-    let cancelled = false;
+    let off = false;
     const probe = new Image();
-    probe.onload = () => !cancelled && setMode("frames");
-    probe.onerror = () => !cancelled && setMode("static");
+    probe.onload = () => !off && setMode("frames");
+    probe.onerror = () => {
+      fetch("/videos/hero.mp4", { method: "HEAD" })
+        .then((r) => !off && setMode(r.ok && (r.headers.get("content-type") ?? "").includes("video") ? "video" : "static"))
+        .catch(() => !off && setMode("static"));
+    };
     probe.src = frameSrc(1);
     return () => {
-      cancelled = true;
+      off = true;
     };
   }, [reduce]);
 
-  // Scrubbing: el scroll decide qué fotograma se pinta en el canvas
+  // Modo fotogramas: el scroll decide qué fotograma se pinta
   useEffect(() => {
     if (mode !== "frames") return;
     const canvas = canvasRef.current;
@@ -132,36 +133,72 @@ export default function ScrollHero() {
     };
   }, [mode, scrollYProgress]);
 
+  // Modo vídeo: solo suena (se reproduce) mientras el hero está en pantalla
+  useEffect(() => {
+    const v = videoRef.current;
+    if (mode !== "video" || !v) return;
+    const io = new IntersectionObserver(([e]) => (e.isIntersecting ? void v.play().catch(() => {}) : v.pause()), {
+      threshold: 0.15,
+    });
+    io.observe(v);
+    return () => io.disconnect();
+  }, [mode]);
+
   const scrub = mode === "frames";
 
+  // Un único bloque de texto en todos los modos: así la animación de entrada no se reinicia
   return (
     <section
       ref={sectionRef}
-      className={`hero ${scrub ? "hero--scrub" : "hero--static"}`}
+      className={`hero ${scrub ? "hero--scrub" : ""}`}
       aria-label="Presentación de Pro Diva"
     >
-      {scrub ? (
-        <div className="hero__stick">
-          <canvas ref={canvasRef} className="hero__canvas" aria-hidden="true" />
-          <div className="hero__veil" />
-          <motion.div className="hero__copy" style={{ opacity: introOpacity, y: introY }}>
-            <HeroCopy animate />
-          </motion.div>
+      <div className={scrub ? "hero__stick" : "hero__flat"}>
+        {mode === "frames" && (
+          <>
+            <canvas ref={canvasRef} className="hero__canvas" aria-hidden="true" />
+            <div className="hero__veil" />
+          </>
+        )}
+        {mode === "video" && (
+          <>
+            <video
+              ref={videoRef}
+              className="hero__video"
+              src="/videos/hero.mp4"
+              poster="/videos/hero.jpg"
+              muted
+              loop
+              playsInline
+              preload="auto"
+              aria-hidden="true"
+            />
+            <div className="hero__veil" />
+          </>
+        )}
+        {(mode === "probe" || mode === "static") && (
+          <>
+            <Art variant="hero" />
+            <Petals />
+          </>
+        )}
+
+        <motion.div
+          className={`hero__copy ${scrub ? "" : "hero__copy--static"}`}
+          style={scrub ? { opacity: introOpacity, y: introY } : undefined}
+        >
+          <HeroCopy />
+        </motion.div>
+
+        <div className="hero__badge"><RotatingBadge /></div>
+
+        {scrub && (
           <motion.div className="hero__copy hero__copy--outro" style={{ opacity: outroOpacity, y: outroY }}>
             <p className="hero__outro">Elige tu hueco. Lo guardamos para ti.</p>
-            <Link href="/reservar" className="btn btn--primary btn--lg">Reservar cita</Link>
+            <TransitionLink href="/reservar" className="btn btn--primary btn--lg">Reservar cita</TransitionLink>
           </motion.div>
-        </div>
-      ) : (
-        <>
-          <Petals />
-          <div className="container">
-            <div className="hero__copy hero__copy--static">
-              <HeroCopy animate={mode === "static" && !reduce} />
-            </div>
-          </div>
-        </>
-      )}
+        )}
+      </div>
     </section>
   );
 }

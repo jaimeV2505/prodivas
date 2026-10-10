@@ -1,10 +1,16 @@
 import Link from "next/link";
-import { ArrowRight, Clock, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
+import { Clock, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
+import HowItWorks from "@/components/HowItWorks";
+import Marquee from "@/components/Marquee";
+import ReelWall from "@/components/ReelWall";
+import RevealText from "@/components/RevealText";
 import ScrollHero from "@/components/ScrollHero";
+import ServiceReel, { type ReelGroup } from "@/components/ServiceReel";
 import SiteHeader from "@/components/SiteHeader";
+import TransitionLink from "@/components/TransitionLink";
 import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
-import { fmtDuration, fmtPrice, WEEKDAYS } from "@/lib/format";
+import { WEEKDAYS } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -68,12 +74,20 @@ export default async function Home() {
     ),
   ]);
 
-  const groups: { category: string; items: ServiceRow[] }[] = [];
+  const groups: ReelGroup[] = [];
   for (const s of services) {
     let g = groups.find((x) => x.category === s.category);
     if (!g) groups.push((g = { category: s.category, items: [] }));
-    g.items.push(s);
+    g.items.push({
+      id: s.id,
+      slug: s.slug,
+      name: s.name,
+      description: s.description,
+      durationMin: s.durationMin,
+      priceCents: s.priceCents,
+    });
   }
+  const marqueeItems = Array.from(new Set(services.map((s) => s.name))).slice(0, 8);
   const hours = groupHours(hoursRows);
   const { salon } = CONFIG;
   const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(salon.address)}`;
@@ -83,40 +97,30 @@ export default async function Home() {
       <SiteHeader />
       <main>
         <ScrollHero />
+        <Marquee items={marqueeItems} />
 
-        <section id="servicios" className="section">
+        <section id="servicios" className="section section--tight">
           <div className="container">
-            <h2 className="section__title">Servicios y precios</h2>
+            <RevealText as="h2" text="Servicios y precios" className="section__title" />
             <p className="section__lead">
-              Pulsa en cualquier servicio para ver los huecos libres. También tenemos tienda de productos de peluquería.
+              Pulsa cualquier servicio para ver los huecos libres. También tenemos tienda de productos de peluquería.
             </p>
-            {groups.map((g) => (
-              <div key={g.category} className="menu">
-                <h3 className="menu__cat">{g.category}</h3>
-                <ul>
-                  {g.items.map((s) => (
-                    <li key={s.id} className="menu__row">
-                      <div className="menu__name">
-                        <h4>{s.name}</h4>
-                        {s.description && <p>{s.description}</p>}
-                      </div>
-                      <span className="menu__meta">{fmtDuration(s.durationMin)}</span>
-                      <span className="menu__price">{fmtPrice(s.priceCents)}</span>
-                      <Link className="menu__cta" href={`/reservar?servicio=${s.slug}`} aria-label={`Reservar ${s.name}`}>
-                        Reservar <ArrowRight size={15} aria-hidden="true" />
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
           </div>
         </section>
+        <ServiceReel groups={groups} />
 
-        <section id="donde" className="section section--tint">
+        <section className="section">
+          <HowItWorks holdMinutes={CONFIG.holdMinutes} />
+        </section>
+
+        <section className="section section--tint">
+          <ReelWall instagram={salon.instagram} />
+        </section>
+
+        <section id="donde" className="section">
           <div className="container where">
             <div>
-              <h2 className="section__title">Dónde estamos</h2>
+              <RevealText as="h2" text="Dónde estamos" className="section__title" />
               <address className="where__address">
                 <p>
                   <MapPin size={18} aria-hidden="true" />
@@ -148,14 +152,16 @@ export default async function Home() {
                   </div>
                 ))}
               </dl>
-              <Link href="/reservar" className="btn btn--primary btn--lg">Reservar cita</Link>
+              <TransitionLink href="/reservar" className="btn btn--primary btn--lg">Reservar cita</TransitionLink>
             </div>
           </div>
         </section>
       </main>
       <footer className="footer">
-        <div className="container">
-          <p>© {new Date().getFullYear()} Pro Diva · Centro de estética y tienda de peluquería en Melide.</p>
+        <div className="footer__word" aria-hidden="true">Pro Diva</div>
+        <div className="container footer__in">
+          <p>© {new Date().getFullYear()} Pro Diva. Centro de estética y tienda de peluquería en Melide.</p>
+          <Link href="/reservar">Reservar cita</Link>
         </div>
       </footer>
     </>

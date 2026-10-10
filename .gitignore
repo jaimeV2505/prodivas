@@ -8,3 +8,7 @@ out
 next-env.d.ts
 public/frames/*.webp
 public/hero/*.mp4
+.env.vercel
+.env*.local
+.env.vercel
+.env*.local
