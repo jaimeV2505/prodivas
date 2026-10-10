@@ -14,7 +14,8 @@ Next.js 15 · React 19 · TypeScript · PostgreSQL · Framer Motion · Docker (l
 - Respeta horario, pausa de mediodía, bloqueos (vacaciones/festivos), preaviso mínimo y duración de cada servicio.
 - La clienta puede cancelar desde su enlace (hasta 24 h antes). Añadir al calendario (.ics) y aviso por WhatsApp.
 - **Panel `/admin`**: agenda por día, citas manuales (teléfono/WhatsApp), cancelar, bloquear horarios.
-- Emails opcionales (Resend) a la dueña y a la clienta.
+- Notificaciones por WhatsApp, SMS, email y Telegram, con recordatorio y confirmación (ver más abajo).
+- Mini-app instalable `/cita` en modo fácil.
 
 ## Arrancar en local con Docker
 
@@ -40,6 +41,63 @@ npm run db:migrate && npm run dev
 3. Variables de entorno: `DATABASE_URL`, `ADMIN_PASSWORD`, `SESSION_SECRET` (`openssl rand -hex 32`), `WHATSAPP_NUMBER`,
    y opcionalmente `OWNER_EMAIL`, `RESEND_API_KEY`, `MAIL_FROM`, `NEXT_PUBLIC_SITE_URL` (tu dominio, para los enlaces de los emails).
 4. Deploy. El script `vercel-build` ejecuta `scripts/migrate.mjs` antes de compilar: crea el esquema (idempotente) y carga los datos de ejemplo solo si la tabla de servicios está vacía.
+
+## Notificaciones y recordatorios (evitar huecos y "no shows")
+
+**Qué pasa con cada cita**
+
+1. **Al reservar:** confirmación a la clienta (WhatsApp, o SMS si no hay WhatsApp; email además si lo dejó) y aviso instantáneo a la dueña por Telegram.
+2. **4 horas antes** (`REMINDER_HOURS_BEFORE`): mensaje "¿Vienes hoy a las 17:00?" con **Confirmar / Cancelar**. Nunca de madrugada: si caería antes de las 08:30, se envía la tarde anterior a las 19:00. Las citas reservadas con menos de 5 h de antelación no llevan recordatorio.
+3. **Si cancela:** el hueco se libera al instante y la dueña recibe "Hueco libre hoy a las 17:00" para poder ofrecérselo a otra persona.
+4. **Si no responde:** una hora después del recordatorio, la dueña recibe "Sin respuesta, llámala" con el teléfono. En la agenda de `/admin` cada cita muestra *Ha confirmado / Sin respuesta / Recordatorio pendiente*.
+
+Las citas **no se cancelan solas**: decide siempre la dueña. Cancelar desde el recordatorio se permite siempre (aunque falten pocas horas), porque un hueco avisado a tiempo se puede volver a vender.
+
+**Canales** (cada uno se activa solo si pones sus variables en `.env` / Vercel; puedes empezar solo con Telegram + SMS):
+
+| Canal | Para quién | Variables | Notas |
+| --- | --- | --- | --- |
+| Telegram | dueña | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | gratis; lo más rápido para empezar |
+| Email (Resend) | clienta y dueña | `RESEND_API_KEY`, `MAIL_FROM`, `OWNER_EMAIL` | necesita dominio verificado |
+| SMS (Twilio) | clienta | `TWILIO_*` | con enlace de un toque; tiene coste por mensaje |
+| WhatsApp Business (Meta) | clienta | `WHATSAPP_*`, `WA_TEMPLATE_*` | botones Confirmar/Cancelar dentro del chat; requiere cuenta de empresa y plantillas aprobadas |
+
+Cada mensaje lleva además un **enlace de un toque** (`/c/CÓDIGO?t=…`) a una pantalla con dos botones enormes. El enlace nunca confirma ni cancela por sí solo: hay que pulsar el botón (así los antivirus de correo no lo activan).
+
+**Plantillas de WhatsApp** (créalas en Meta Business Manager, categoría *Utilidad*, idioma *Español*):
+
+- `cita_confirmada`, cuerpo: `Hola {{1}}, tu cita en Pro Diva está confirmada: {{2}}, {{3}}. Te avisaremos el mismo día para que confirmes que vienes.` Botón URL: `https://TU-DOMINIO/c/{{1}}` (texto "Ver o cancelar").
+- `recordatorio_cita`, cuerpo: `Hola {{1}}, te recordamos tu cita en Pro Diva: {{2}}, {{3}}. ¿Vienes?` Dos botones de respuesta rápida: "Confirmar" y "Cancelar".
+- Webhook en Meta: `https://TU-DOMINIO/api/whatsapp/webhook` con tu `WHATSAPP_VERIFY_TOKEN`, suscrito al campo `messages`.
+
+**Programar los recordatorios.** Hace falta que algo llame cada ~10 min a `/api/cron/reminders`.
+Los *Cron Jobs* del plan Hobby de Vercel solo pueden ejecutarse una vez al día (compruébalo en la documentación actual) y un `vercel.json` con una frecuencia mayor **rompe el despliegue**, así que usamos GitHub Actions (incluido: `.github/workflows/reminders.yml`):
+
+1. Define `CRON_SECRET` en Vercel (`openssl rand -hex 32`).
+2. En GitHub → Settings → Secrets and variables → Actions crea `CRON_SECRET` (el mismo valor) y `SITE_URL` (`https://prodivas.vercel.app`).
+3. Prueba a mano: pestaña *Actions* → *Recordatorios* → *Run workflow*. Respuesta esperada: `{"ok":true,"reminded":0,"failed":0,"alerted":0}`.
+
+GitHub puede retrasar unos minutos las ejecuciones programadas y desactiva los workflows de repos sin actividad durante 60 días. Alternativa: cron-job.org (gratis) con `POST` y la cabecera `Authorization: Bearer <CRON_SECRET>`.
+
+En local: `curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost:3100/api/cron/reminders`.
+
+## Lista de espera (rellena los huecos que se liberan)
+
+- Cuando una clienta no encuentra hueco, en la reserva (y en el modo fácil) puede pulsar **"Avísame si se libera"**: nombre, teléfono y, si quiere, mañana o tarde. Puede esperar un día concreto o *cualquier día de las próximas dos semanas*.
+- **Cuando alguien cancela** (desde el recordatorio, desde su enlace o desde `/admin`), el sistema comprueba con el motor de huecos que el servicio de cada persona en espera **de verdad cabe** y avisa a las tres primeras por orden de llegada (WhatsApp o SMS, y email si lo dejó) con un enlace corto `/hueco/…` que abre la reserva con el servicio y el día ya elegidos. Quien reserve antes se lo queda; el bloqueo de huecos impide dobles reservas.
+- La dueña recibe por Telegram: quién se apunta y a cuántas personas se ha avisado. En `/admin` hay un panel con la lista (llamar, WhatsApp, quitar).
+- Cuando una persona reserva, deja de esperar ese día. Los avisos de días pasados, y los de "cualquier día" con más de 14 días, caducan solos.
+- Plantilla de WhatsApp (Utilidad, Español) `hueco_libre`: `Hola {{1}}, se ha liberado un hueco para {{2}}: {{3}}. Resérvalo antes de que se ocupe.` Botón URL: `https://TU-DOMINIO/hueco/{{1}}`. Si Meta la clasifica como *Marketing*, funcionará igual pero con otra tarifa y requisitos.
+
+## App de reserva fácil (`/cita`)
+
+Una versión aparte, **solo para pedir cita**, pensada para quien no se maneja con la web:
+una pregunta por pantalla, botones enormes, sin calendario, con "Llamar" siempre visible, y recuerda la cita en el móvil.
+Es una **PWA instalable**: se añade a la pantalla de inicio con su icono y se abre a pantalla completa.
+
+- Dirección para compartir o imprimir en el centro: `https://prodivas.vercel.app/cita` (genera un código QR con cualquier generador gratuito).
+- Android (Chrome): botón *Instalar en mi móvil*. iPhone (Safari): *Compartir → Añadir a pantalla de inicio*.
+- Los iconos están en `public/icons`; cámbialos por el logo real cuando lo tengas.
 
 ## ⚠️ Antes de publicar: ajusta tus datos
 

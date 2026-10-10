@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion, useScroll, useTransform } from "framer-motion";
+import { Check } from "lucide-react";
 import Art from "./Art";
 import Magnetic from "./Magnetic";
 import Petals from "./Petals";
@@ -13,13 +14,18 @@ const FRAME_COUNT = Number(process.env.NEXT_PUBLIC_HERO_FRAMES ?? 90);
 const frameSrc = (i: number) => `/frames/frame_${String(i).padStart(4, "0")}.webp`;
 const WORDS = ["Tu", "cita", "en", "Pro", "Diva,", "sin", "llamar."];
 
-function HeroCopy() {
+export type NextSlot = { label: string; href: string };
+
+function HeroCopy({ nextSlots }: { nextSlots: NextSlot[] }) {
   return (
     <>
-      <h1 className="hero__title" aria-label={WORDS.join(" ")}>
+      <h1 className="hero__title">
         {WORDS.map((w, i) => (
-          <span className="hero__word" key={i} aria-hidden="true">
-            <span style={{ ["--i" as string]: i } as React.CSSProperties}>{w}</span>
+          <span key={i}>
+            <span className="hero__word">
+              <span style={{ ["--i" as string]: i } as React.CSSProperties}>{w}</span>
+            </span>
+            {i < WORDS.length - 1 ? " " : null}
           </span>
         ))}
       </h1>
@@ -33,6 +39,20 @@ function HeroCopy() {
         </Magnetic>
         <Link href="/#servicios" className="btn btn--ghost btn--lg">Ver servicios y precios</Link>
       </div>
+      <ul className="hero__trust">
+        <li><Check size={16} aria-hidden="true" /> Sin registrarte</li>
+        <li><Check size={16} aria-hidden="true" /> Hueco guardado mientras reservas</li>
+        <li><Check size={16} aria-hidden="true" /> Aviso el mismo día, cancelas con un toque</li>
+      </ul>
+      {nextSlots.length > 0 && (
+        <div className="hero__slots">
+          <span className="hero__slots-label"><i className="live" aria-hidden="true" /> Próximos huecos libres</span>
+          {nextSlots.map((c) => (
+            <TransitionLink key={c.href} href={c.href} className="chip">{c.label}</TransitionLink>
+          ))}
+        </div>
+      )}
+      <p className="hero__easy">¿Prefieres algo más sencillo? <TransitionLink href="/cita">Pedir cita en modo fácil</TransitionLink></p>
     </>
   );
 }
@@ -45,7 +65,7 @@ type Mode = "probe" | "frames" | "video" | "static";
  *  2. /public/videos/hero.mp4            → vídeo de fondo en bucle
  *  3. nada                               → fondo animado con pétalos
  */
-export default function ScrollHero() {
+export default function ScrollHero({ nextSlots = [] }: { nextSlots?: NextSlot[] }) {
   const reduce = useReducedMotion();
   const sectionRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -187,7 +207,7 @@ export default function ScrollHero() {
           className={`hero__copy ${scrub ? "" : "hero__copy--static"}`}
           style={scrub ? { opacity: introOpacity, y: introY } : undefined}
         >
-          <HeroCopy />
+          <HeroCopy nextSlots={nextSlots} />
         </motion.div>
 
         <div className="hero__badge"><RotatingBadge /></div>

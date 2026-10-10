@@ -6,6 +6,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
 import { daysInMonth } from "@/lib/dates";
 import PetalBurst from "./PetalBurst";
+import WaitlistForm from "./WaitlistForm";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
 
 export type Service = {
@@ -43,6 +44,7 @@ type Props = {
   services: Service[];
   staff: Staff[];
   initialSlug?: string;
+  initialDay?: string;
   today: string;
   maxDate: string;
   whatsapp: string;
@@ -71,7 +73,7 @@ function icsHref(d: Done, address: string): string {
   return "data:text/calendar;charset=utf-8," + encodeURIComponent(lines.join("\r\n"));
 }
 
-export default function BookingFlow({ services, staff, initialSlug, today, maxDate, whatsapp, address }: Props) {
+export default function BookingFlow({ services, staff, initialSlug, initialDay, today, maxDate, whatsapp, address }: Props) {
   const reduce = useReducedMotion();
   const multiStaff = staff.length > 1;
   const stepOrder: Step[] = multiStaff ? ["service", "staff", "time", "details"] : ["service", "time", "details"];
@@ -86,9 +88,9 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
   const [service, setService] = useState<Service | null>(initialService);
   const [staffChoice, setStaffChoice] = useState<number | null>(null); // null = cualquiera
   const [step, setStep] = useState<Step>(initialService ? (multiStaff ? "staff" : "time") : "service");
-  const [month, setMonth] = useState(today.slice(0, 7));
+  const [month, setMonth] = useState((initialDay && initialDay >= today ? initialDay : today).slice(0, 7));
   const [slots, setSlots] = useState<Slot[] | null>(null);
-  const [day, setDay] = useState<string | null>(null);
+  const [day, setDay] = useState<string | null>(initialDay && initialDay >= today ? initialDay : null);
   const [hold, setHold] = useState<Hold | null>(null);
   const [busySlot, setBusySlot] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "info"; text: string } | null>(null);
@@ -520,6 +522,17 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                   </div>
                 )}
 
+                {!hold && slots !== null && (
+                  <WaitlistForm
+                    key={`${service.id}-${day ?? "any"}`}
+                    serviceId={service.id}
+                    day={day}
+                    dayLabel={day ? fmtDayLabel(day) : undefined}
+                    source="web"
+                    startOpen={Object.keys(dayInfo).length === 0}
+                  />
+                )}
+
                 <AnimatePresence>
                   {hold && (
                     <motion.div
@@ -578,7 +591,7 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                   <input className="hp" tabIndex={-1} autoComplete="off" aria-hidden="true" name="website" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
                   <label className="check">
                     <input type="checkbox" required checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} />
-                    <span>Acepto que Pro Diva use mis datos para gestionar esta cita.</span>
+                    <span>Acepto que Pro Diva use mis datos para gestionar esta cita y enviarme la confirmación y un recordatorio por WhatsApp, SMS o email.</span>
                   </label>
                   <button type="submit" className="btn btn--primary btn--lg btn--block" disabled={submitting}>
                     {submitting ? "Confirmando…" : "Confirmar cita"}
@@ -636,7 +649,7 @@ export default function BookingFlow({ services, staff, initialSlug, today, maxDa
                   </a>
                   <Link className="btn btn--ghost" href={`/reserva/${done.code}?t=${done.token}`}>Ver o cancelar mi cita</Link>
                 </div>
-                <p className="muted small">Guarda este enlace: es la única forma de gestionar tu cita online.</p>
+                <p className="muted small">El mismo día te escribiremos para que confirmes con un toque. Guarda el enlace de arriba por si necesitas cancelar.</p>
               </div>
             )}
           </motion.section>

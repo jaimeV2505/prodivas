@@ -70,3 +70,50 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE INDEX IF NOT EXISTS bookings_starts_idx ON bookings (starts_at);
 CREATE INDEX IF NOT EXISTS bookings_hold_ip_idx ON bookings (ip_hash) WHERE status = 'HOLD';
 CREATE INDEX IF NOT EXISTS time_off_range_idx ON time_off (starts_at, ends_at);
+
+-- ---------------------------------------------------------------------
+-- Notificaciones y recordatorios (idempotente)
+-- ---------------------------------------------------------------------
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS remind_at         timestamptz;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_sent_at  timestamptz;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_attempts int NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_response text CHECK (customer_response IN ('CONFIRMED','CANCELLED'));
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS responded_at      timestamptz;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancel_reason     text;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS owner_alerted_at  timestamptz;
+
+CREATE TABLE IF NOT EXISTS notification_log (
+  id         bigserial PRIMARY KEY,
+  booking_id uuid REFERENCES bookings(id) ON DELETE CASCADE,
+  kind       text NOT NULL,
+  channel    text NOT NULL,
+  status     text NOT NULL CHECK (status IN ('SENT','FAILED')),
+  detail     text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notification_log_booking_idx ON notification_log (booking_id, created_at);
+CREATE INDEX IF NOT EXISTS bookings_remind_idx ON bookings (remind_at)
+  WHERE status = 'CONFIRMED' AND reminder_sent_at IS NULL;
+
+-- ---------------------------------------------------------------------
+-- Lista de espera: avisar cuando se libera un hueco
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS waitlist (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_id   int  NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  day          date,                                   -- NULL = cualquier día de los próximos 14
+  part         text NOT NULL DEFAULT 'ANY' CHECK (part IN ('ANY','MORNING','AFTERNOON')),
+  name         text NOT NULL,
+  phone        text NOT NULL,
+  phone_key    text NOT NULL,                          -- últimos 9 dígitos, para comparar
+  email        text,
+  source       text NOT NULL DEFAULT 'web',            -- 'web' o 'app' (modo fácil)
+  status       text NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','NOTIFIED','BOOKED','CANCELLED')),
+  ip_hash      text,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  notified_at  timestamptz,
+  notified_slot timestamptz
+);
+CREATE UNIQUE INDEX IF NOT EXISTS waitlist_unique_active
+  ON waitlist (service_id, COALESCE(day, DATE '1970-01-01'), phone_key) WHERE status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS waitlist_match_idx ON waitlist (status, day);

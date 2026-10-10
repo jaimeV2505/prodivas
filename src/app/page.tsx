@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Clock, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
 import HowItWorks from "@/components/HowItWorks";
+import MobileCta from "@/components/MobileCta";
 import Marquee from "@/components/Marquee";
 import ReelWall from "@/components/ReelWall";
 import RevealText from "@/components/RevealText";
@@ -8,7 +9,10 @@ import ScrollHero from "@/components/ScrollHero";
 import ServiceReel, { type ReelGroup } from "@/components/ServiceReel";
 import SiteHeader from "@/components/SiteHeader";
 import TransitionLink from "@/components/TransitionLink";
+import { getSlotRows, groupSlots } from "@/lib/availability";
 import { CONFIG } from "@/lib/config";
+import { addDays, todayIn } from "@/lib/dates";
+import { siteUrl } from "@/lib/site";
 import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
 
@@ -74,6 +78,27 @@ export default async function Home() {
     ),
   ]);
 
+  // Próximos huecos libres (servicio más corto): empuja a reservar y ayuda a llenar el día
+  const today = todayIn(CONFIG.tz);
+  const shortest = services.reduce<ServiceRow | null>((m, x) => (!m || x.durationMin < m.durationMin ? x : m), null);
+  let nextSlots: { label: string; href: string }[] = [];
+  if (shortest) {
+    try {
+      const rows = await getSlotRows({ from: today, to: addDays(today, 4), durationMin: shortest.durationMin });
+      const wd = new Intl.DateTimeFormat("es-ES", { weekday: "short", timeZone: "UTC" });
+      nextSlots = groupSlots(rows)
+        .filter((x) => x.available)
+        .slice(0, 5)
+        .map((x) => {
+          const [y, m, d] = x.day.split("-").map(Number);
+          const label = x.day === today ? "Hoy" : x.day === addDays(today, 1) ? "Mañana" : wd.format(new Date(Date.UTC(y, m - 1, d)));
+          return { label: `${label} ${x.time}`, href: `/reservar?servicio=${shortest.slug}&dia=${x.day}` };
+        });
+    } catch {
+      nextSlots = [];
+    }
+  }
+
   const groups: ReelGroup[] = [];
   for (const s of services) {
     let g = groups.find((x) => x.category === s.category);
@@ -89,14 +114,43 @@ export default async function Home() {
   }
   const marqueeItems = Array.from(new Set(services.map((s) => s.name))).slice(0, 8);
   const hours = groupHours(hoursRows);
+  const DAY = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const openingHours = hoursRows
+    .filter((h) => !h.closed && h.open_time && h.close_time)
+    .flatMap((h) =>
+      h.break_start && h.break_end
+        ? [
+            { "@type": "OpeningHoursSpecification", dayOfWeek: DAY[h.weekday], opens: hm(h.open_time), closes: hm(h.break_start) },
+            { "@type": "OpeningHoursSpecification", dayOfWeek: DAY[h.weekday], opens: hm(h.break_end), closes: hm(h.close_time) },
+          ]
+        : [{ "@type": "OpeningHoursSpecification", dayOfWeek: DAY[h.weekday], opens: hm(h.open_time), closes: hm(h.close_time) }],
+    );
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BeautySalon",
+    name: "Pro Diva",
+    url: siteUrl(),
+    telephone: `+34${CONFIG.salon.phoneMobile.replace(/\s/g, "")}`,
+    address: {
+      "@type": "PostalAddress",
+      streetAddress: "Rúa Rambla San Pablo, 6",
+      postalCode: "15800",
+      addressLocality: "Melide",
+      addressRegion: "A Coruña",
+      addressCountry: "ES",
+    },
+    sameAs: [`https://www.instagram.com/${CONFIG.salon.instagram}/`],
+    openingHoursSpecification: openingHours,
+  };
   const { salon } = CONFIG;
   const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(salon.address)}`;
 
   return (
     <>
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }} />
       <SiteHeader />
       <main>
-        <ScrollHero />
+        <ScrollHero nextSlots={nextSlots} />
         <Marquee items={marqueeItems} />
 
         <section id="servicios" className="section section--tight">
@@ -164,6 +218,7 @@ export default async function Home() {
           <Link href="/reservar">Reservar cita</Link>
         </div>
       </footer>
+      <MobileCta whatsapp={salon.whatsapp} />
     </>
   );
 }

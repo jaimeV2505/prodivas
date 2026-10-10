@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import BookingFlow, { type Service, type Staff } from "@/components/BookingFlow";
 import SiteHeader from "@/components/SiteHeader";
 import { CONFIG } from "@/lib/config";
-import { addDays, todayIn } from "@/lib/dates";
+import { addDays, isDay, todayIn } from "@/lib/dates";
 import { query } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -11,7 +11,7 @@ export const metadata: Metadata = { title: "Reservar cita" };
 export default async function ReservarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ servicio?: string }>;
+  searchParams: Promise<{ servicio?: string; dia?: string }>;
 }) {
   const sp = await searchParams;
   const [services, staff] = await Promise.all([
@@ -32,6 +32,7 @@ export default async function ReservarPage({
           services={services}
           staff={staff}
           initialSlug={sp.servicio}
+          initialDay={sp.dia && isDay(sp.dia) ? sp.dia : undefined}
           today={today}
           maxDate={addDays(today, CONFIG.maxDaysAhead)}
           whatsapp={CONFIG.salon.whatsapp}

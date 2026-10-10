@@ -31,7 +31,7 @@ function LiveSlots() {
   const { mine, taken } = SCRIPT[i];
   return (
     <div ref={ref} className="demo" role="img" aria-label="Demostración: al elegir un hueco queda bloqueado y otras personas ya no pueden cogerlo.">
-      <p className="demo__day">Martes 14 de octubre</p>
+      <p className="demo__day">Elige tu hora</p>
       <div className="slots__grid" aria-hidden="true">
         {TIMES.map((t, k) => {
           const isMine = mine === k;
@@ -65,7 +65,8 @@ function LiveSlots() {
 const STEPS = (hold: number) => [
   { t: "Elige tu servicio", d: "Manicura, pestañas, depilación o microblading, con duración y precio a la vista." },
   { t: "Escoge un hueco libre", d: `Lo bloqueamos ${hold} minutos para ti. Nadie más puede cogerlo mientras terminas.` },
-  { t: "Confirma con tu teléfono", d: "Recibes un código y un enlace por si necesitas cancelar." },
+  { t: "Confirma con tu teléfono", d: "Te llega la confirmación por mensaje, con un enlace por si necesitas cancelar." },
+  { t: "Te lo recordamos", d: "El mismo día te escribimos para que confirmes con un toque. Si no puedes venir, otra persona aprovechará tu hueco." },
 ];
 
 export default function HowItWorks({ holdMinutes }: { holdMinutes: number }) {

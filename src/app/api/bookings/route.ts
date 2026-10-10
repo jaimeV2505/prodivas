@@ -2,7 +2,8 @@ import { after, type NextRequest } from "next/server";
 import { z } from "zod";
 import { BookingError, confirmBooking } from "@/lib/bookings";
 import { respond } from "@/lib/http";
-import { notifyBooking } from "@/lib/notify";
+import { notifyBookingCreated } from "@/lib/notify";
+import { markWaitlistBooked } from "@/lib/waitlist";
 
 export const dynamic = "force-dynamic";
 
@@ -31,7 +32,10 @@ export async function POST(req: NextRequest) {
       email: b.email || null,
       notes: b.notes || null,
     });
-    after(() => notifyBooking(booking, "created"));
+    after(async () => {
+      await notifyBookingCreated(booking);
+      await markWaitlistBooked(booking.customerPhone, booking.startsAt);
+    });
     return { booking };
   });
 }

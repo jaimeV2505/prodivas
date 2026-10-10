@@ -1,10 +1,14 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { after } from "next/server";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { isAdmin, loginAdmin, logoutAdmin } from "@/lib/auth";
-import { addTimeOff, adminCancel, BookingError, createManualBooking, removeTimeOff } from "@/lib/bookings";
+import { addTimeOff, adminCancel, BookingError, createManualBooking, getSummaryById, removeTimeOff } from "@/lib/bookings";
+import { notifyCancelledByCentre } from "@/lib/notify";
+import { query } from "@/lib/db";
+import { offerFreedSlot } from "@/lib/waitlist";
 import { isDay } from "@/lib/dates";
 
 async function guard() {
@@ -27,7 +31,14 @@ export async function logout() {
 export async function cancelBookingAction(fd: FormData) {
   await guard();
   const id = z.string().uuid().parse(str(fd, "id"));
+  const before = await getSummaryById(id);
   await adminCancel(id);
+  if (before && before.status === "CONFIRMED") {
+    after(async () => {
+      if (before.customerPhone) await notifyCancelledByCentre(before);
+      await offerFreedSlot(before);
+    });
+  }
   revalidatePath("/admin");
   back(str(fd, "day"));
 }
@@ -88,6 +99,14 @@ export async function addTimeOffAction(fd: FormData) {
 export async function removeTimeOffAction(fd: FormData) {
   await guard();
   await removeTimeOff(Number(str(fd, "id")));
+  revalidatePath("/admin");
+  back(str(fd, "day"));
+}
+
+export async function removeWaitlistAction(fd: FormData) {
+  await guard();
+  const id = z.string().uuid().parse(str(fd, "id"));
+  await query(`UPDATE waitlist SET status = 'CANCELLED' WHERE id = $1::uuid`, [id]);
   revalidatePath("/admin");
   back(str(fd, "day"));
 }

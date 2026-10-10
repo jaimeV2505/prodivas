@@ -12,6 +12,7 @@ import {
   login,
   logout,
   removeTimeOffAction,
+  removeWaitlistAction,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -30,7 +31,10 @@ type Row = {
   service_name: string;
   price_cents: number;
   staff_name: string;
+  customer_response: string | null;
+  reminder_sent_at: string | null;
 };
+type WaitRow = { id: string; day: string | null; part: string; name: string; phone: string; status: string; service_name: string };
 type OffRow = { id: number; day: string; t_start: string; t_end: string; staff_name: string | null; reason: string | null };
 
 export default async function AdminPage({
@@ -61,12 +65,12 @@ export default async function AdminPage({
   const today = todayIn(CONFIG.tz);
   const day = sp.d && isDay(sp.d) ? sp.d : today;
 
-  const [bookings, services, staff, timeOff] = await Promise.all([
+  const [bookings, services, staff, timeOff, waitlist] = await Promise.all([
     query<Row>(
       `SELECT b.id, b.code, b.status, b.source,
               to_char(b.starts_at AT TIME ZONE $2::text, 'HH24:MI') AS t_start,
               to_char(b.ends_at   AT TIME ZONE $2::text, 'HH24:MI') AS t_end,
-              b.customer_name, b.customer_phone, b.notes,
+              b.customer_name, b.customer_phone, b.notes, b.customer_response, b.reminder_sent_at,
               s.name AS service_name, s.price_cents, st.name AS staff_name
        FROM bookings b
        JOIN services s ON s.id = b.service_id
@@ -89,6 +93,12 @@ export default async function AdminPage({
        FROM time_off t LEFT JOIN staff st ON st.id = t.staff_id
        WHERE t.ends_at > now() ORDER BY t.starts_at LIMIT 30`,
       [CONFIG.tz],
+    ),
+    query<WaitRow>(
+      `SELECT w.id, to_char(w.day, 'YYYY-MM-DD') AS day, w.part, w.name, w.phone, w.status, s.name AS service_name
+       FROM waitlist w JOIN services s ON s.id = w.service_id
+       WHERE w.status IN ('ACTIVE','NOTIFIED')
+       ORDER BY w.day NULLS LAST, w.created_at LIMIT 40`,
     ),
   ]);
 
@@ -138,6 +148,11 @@ export default async function AdminPage({
               <span className={`badge badge--${b.status.toLowerCase()}`}>
                 {b.status === "CONFIRMED" ? (b.source === "admin" ? "Manual" : "Online") : b.status === "CANCELLED" ? "Cancelada" : "En proceso"}
               </span>
+              {b.status === "CONFIRMED" && (
+                <span className={`badge ${b.customer_response === "CONFIRMED" ? "badge--ok" : b.reminder_sent_at ? "badge--warn" : ""}`}>
+                  {b.customer_response === "CONFIRMED" ? "Ha confirmado" : b.reminder_sent_at ? "Sin respuesta" : "Recordatorio pendiente"}
+                </span>
+              )}
               {b.status !== "CANCELLED" && (
                 <form action={cancelBookingAction}>
                   <input type="hidden" name="id" value={b.id} />
@@ -149,6 +164,32 @@ export default async function AdminPage({
           </li>
         ))}
       </ul>
+
+      {waitlist.length > 0 && (
+        <section className="panel">
+          <h2 className="panel__title panel__title--sm">Lista de espera ({waitlist.length})</h2>
+          <p className="muted small">Cuando alguien cancela, avisamos solos a los primeros. Aquí puedes llamarles tú.</p>
+          <ul className="timeoff">
+            {waitlist.map((w) => (
+              <li key={w.id}>
+                <span>
+                  <b>{w.name}</b> quiere {w.service_name}, {w.day ? fmtDayLabel(w.day) : "cualquier día"}
+                  {w.part === "MORNING" ? ", por la mañana" : w.part === "AFTERNOON" ? ", por la tarde" : ""}
+                  {w.status === "NOTIFIED" ? " (avisada)" : ""}
+                  {" · "}
+                  <a href={`tel:${w.phone}`}>{w.phone}</a>{" · "}
+                  <a href={waLink(w.phone)} target="_blank" rel="noopener noreferrer">WhatsApp</a>
+                </span>
+                <form action={removeWaitlistAction}>
+                  <input type="hidden" name="id" value={w.id} />
+                  <input type="hidden" name="day" value={day} />
+                  <button className="btn btn--ghost btn--sm" type="submit">Quitar</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <section className="panel">
         <h2 className="panel__title panel__title--sm">Añadir cita a mano (teléfono, WhatsApp, en el salón)</h2>

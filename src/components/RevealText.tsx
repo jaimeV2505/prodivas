@@ -11,8 +11,9 @@ export default function RevealText({ text, as = "h2", className }: Props) {
   const Tag = as as ElementType;
   return (
     <Tag className={className} aria-label={text}>
-      {text.split(" ").map((w, i) => (
-        <span className="rt__mask" key={i} aria-hidden="true">
+      {text.split(" ").map((w, i, all) => (
+        <span key={i}>
+        <span className="rt__mask" aria-hidden="true">
           <motion.span
             className="rt__word"
             initial={reduce ? false : { transform: "translateY(110%)" }}
@@ -22,6 +23,8 @@ export default function RevealText({ text, as = "h2", className }: Props) {
           >
             {w}
           </motion.span>
+        </span>
+        {i < all.length - 1 ? " " : null}
         </span>
       ))}
     </Tag>

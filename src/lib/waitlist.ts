@@ -1,0 +1,125 @@
+import { CONFIG } from "./config";
+import { addDays, todayIn } from "./dates";
+import { getSlotRows, type SlotRow } from "./availability";
+import { BookingError, type BookingSummary } from "./bookings";
+import { query } from "./db";
+import { notifyOwnerWaitlistOffered, notifyWaitlistSlot } from "./notify";
+import { phoneDigits } from "./site";
+
+export type Part = "ANY" | "MORNING" | "AFTERNOON";
+
+const isUnique = (e: unknown) => typeof e === "object" && e !== null && (e as { code?: string }).code === "23505";
+
+/** Apunta a una persona a la lista de espera de un servicio (un día concreto o cualquiera de los próximos 14). */
+export async function joinWaitlist(input: {
+  serviceId: number;
+  day: string | null;
+  part: Part;
+  name: string;
+  phone: string;
+  email?: string | null;
+  source: "web" | "app";
+  ipHash: string;
+}): Promise<{ already: boolean; serviceName: string }> {
+  const svc = await query<{ name: string }>(`SELECT name FROM services WHERE id = $1::int AND active`, [input.serviceId]);
+  if (!svc[0]) throw new BookingError("NOT_FOUND", "Ese servicio ya no está disponible.", 404);
+
+  const today = todayIn(CONFIG.tz);
+  if (input.day && (input.day < today || input.day > addDays(today, CONFIG.maxDaysAhead))) {
+    throw new BookingError("INVALID", "Esa fecha no es válida.", 400);
+  }
+  const cnt = await query<{ n: number }>(`SELECT count(*)::int AS n FROM waitlist WHERE status = 'ACTIVE' AND ip_hash = $1`, [input.ipHash]);
+  if (cnt[0].n >= 8) throw new BookingError("INVALID", "Ya tienes varios avisos activos. Llámanos y lo vemos juntas.", 429);
+
+  try {
+    await query(
+      `INSERT INTO waitlist (service_id, day, part, name, phone, phone_key, email, source, ip_hash)
+       VALUES ($1::int, $2::date, $3, $4, $5, $6, $7, $8, $9)`,
+      [input.serviceId, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash],
+    );
+    return { already: false, serviceName: svc[0].name };
+  } catch (e) {
+    if (isUnique(e)) return { already: true, serviceName: svc[0].name }; // ya estaba apuntada
+    throw e;
+  }
+}
+
+const hourOf = (r: SlotRow) => Number(r.time.slice(0, 2));
+const partOk = (part: string, r: SlotRow) => part === "ANY" || (part === "MORNING" ? hourOf(r) < 15 : hourOf(r) >= 15);
+
+/**
+ * Se llama cuando se cancela una cita. Busca a quienes esperaban ese servicio/día, comprueba con el
+ * motor de disponibilidad que de verdad hay un hueco que encaja, y avisa a los primeros (por orden de
+ * llegada). Quien reserve antes se lo queda: el bloqueo de huecos evita dobles reservas.
+ */
+export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<number> {
+  const freedStart = new Date(b.startsAt).getTime();
+  const freedEnd = new Date(b.endsAt).getTime();
+  if (freedStart < Date.now() + 30 * 60_000) return 0; // demasiado tarde para que alguien llegue
+
+  const today = todayIn(CONFIG.tz);
+  const freedDay = todayIn(CONFIG.tz, new Date(b.startsAt));
+
+  const entries = await query<{
+    id: string;
+    name: string;
+    phone: string;
+    email: string | null;
+    part: string;
+    duration_min: number;
+    service_name: string;
+  }>(
+    `SELECT w.id, w.name, w.phone, w.email, w.part, s.duration_min, s.name AS service_name
+     FROM waitlist w JOIN services s ON s.id = w.service_id AND s.active
+     WHERE w.status = 'ACTIVE' AND (w.day = $1::date OR (w.day IS NULL AND $1::date <= $2::date + 14))
+     ORDER BY w.created_at LIMIT 40`,
+    [freedDay, today],
+  );
+
+  const cache = new Map<number, SlotRow[]>();
+  let notified = 0;
+  for (const w of entries) {
+    if (notified >= maxPeople) break;
+    let rows = cache.get(w.duration_min);
+    if (!rows) {
+      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: w.duration_min });
+      cache.set(w.duration_min, rows);
+    }
+    const dur = w.duration_min * 60_000;
+    const fit = rows.find((r) => {
+      const t = new Date(r.startsAt).getTime();
+      return r.available && partOk(w.part, r) && t < freedEnd && t + dur > freedStart;
+    });
+    if (!fit) continue;
+    const ok = await notifyWaitlistSlot(
+      { id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: w.service_name },
+      fit.startsAt,
+    );
+    if (ok) {
+      await query(`UPDATE waitlist SET status = 'NOTIFIED', notified_at = now(), notified_slot = $2::timestamptz WHERE id = $1::uuid`, [w.id, fit.startsAt]);
+      notified++;
+    }
+  }
+  if (notified > 0) await notifyOwnerWaitlistOffered(b, notified);
+  return notified;
+}
+
+/** Cuando alguien reserva, deja de esperar ese día. */
+export async function markWaitlistBooked(phone: string | null, startsAtIso: string): Promise<void> {
+  if (!phone) return;
+  await query(
+    `UPDATE waitlist SET status = 'BOOKED'
+     WHERE status IN ('ACTIVE','NOTIFIED') AND phone_key = $1 AND (day IS NULL OR day = $2::date)`,
+    [phoneDigits(phone).slice(-9), todayIn(CONFIG.tz, new Date(startsAtIso))],
+  );
+}
+
+/** Limpieza diaria: días pasados y avisos "cualquier día" con más de 14 días. */
+export async function expireWaitlist(): Promise<void> {
+  await query(
+    `UPDATE waitlist SET status = 'CANCELLED'
+     WHERE status IN ('ACTIVE','NOTIFIED')
+       AND ((day IS NOT NULL AND day < $1::date) OR (day IS NULL AND created_at < now() - interval '14 days'))`,
+    [todayIn(CONFIG.tz)],
+  );
+}
