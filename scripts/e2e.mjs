@@ -73,7 +73,7 @@ const overlaps = (aStart, aDur, bStart, bDur) => {
 
 // ---------- datos de la base de datos ----------
 const services = (
-  await db.query(`SELECT id, name, duration_min, COALESCE(slot_step_min, duration_min) AS step_min FROM services WHERE active ORDER BY duration_min, id`)
+  await db.query(`SELECT id, name, duration_min, buffer_min, COALESCE(slot_step_min, duration_min) AS step_min FROM services WHERE active ORDER BY duration_min, id`)
 ).rows;
 const hours = new Map(
   (
@@ -87,6 +87,20 @@ if (!services.length) {
 }
 
 const staff = (await db.query(`SELECT id FROM staff WHERE active`)).rows;
+const staffHours = new Map(
+  (
+    await db.query(`SELECT staff_id, weekday, closed, to_char(open_time,'HH24:MI') AS open, to_char(close_time,'HH24:MI') AS close,
+                           to_char(break_start,'HH24:MI') AS bs, to_char(break_end,'HH24:MI') AS be FROM staff_hours`)
+  ).rows.map((h) => [`${h.staff_id}:${h.weekday}`, h]),
+);
+/** Horario efectivo de una profesional un día (el suyo si lo tiene; el del salón si no). */
+const effHours = (staffId, weekday) => {
+  const h = hours.get(weekday);
+  if (!h || h.closed) return null;
+  const sh = staffHours.get(`${staffId}:${weekday}`);
+  if (!sh) return h;
+  return sh.closed || !sh.open || !sh.close ? null : sh;
+};
 const mode = (await db.query(`SELECT value FROM settings WHERE key = 'slot_mode'`)).rows[0]?.value ?? process.env.SLOT_MODE ?? "smart";
 const minRest = Math.min(60, Math.max(5, Number((await db.query(`SELECT COALESCE(MIN(duration_min),15) AS m FROM services WHERE active`)).rows[0].m)));
 console.log(`Modo de huecos: ${mode} · resto mínimo: ${minRest} min · ${services.length} servicios · ${staff.length} profesional(es)`);
@@ -116,20 +130,17 @@ const hhmmOf = (ms) => {
  * Si coincide con lo que devuelve la web, la consulta SQL hace lo que dice.
  */
 async function referenceTimes(svc, day) {
-  const h = hours.get(dow(day));
-  if (!h || h.closed) return new Set();
-  const blocks = (h.bs ? [[h.open, h.bs], [h.be, h.close]] : [[h.open, h.close]]).map(([a, b]) => [zoned(day, a), zoned(day, b)]);
   const dayStart = zoned(day, "00:00") - 3600000;
   const dayEnd = zoned(addDays(day, 1), "00:00") + 3600000;
   const bookings = (
     await db.query(
-      `SELECT staff_id, starts_at, ends_at FROM bookings
-       WHERE (status = 'CONFIRMED' OR (status = 'HOLD' AND hold_expires_at > now())) AND starts_at < $2 AND ends_at > $1`,
+      `SELECT staff_id, starts_at, blocked_until AS ends_at FROM bookings
+       WHERE (status = 'CONFIRMED' OR (status = 'HOLD' AND hold_expires_at > now())) AND starts_at < $2 AND blocked_until > $1`,
       [new Date(dayStart), new Date(dayEnd)],
     )
   ).rows;
   const off = (await db.query(`SELECT staff_id, starts_at, ends_at FROM time_off WHERE starts_at < $2 AND ends_at > $1`, [new Date(dayStart), new Date(dayEnd)])).rows;
-  const D = svc.duration_min * 60000;
+  const D = (svc.duration_min + svc.buffer_min) * 60000; // lo que ocupa: servicio + limpieza
   const S = Math.max(5, svc.step_min) * 60000;
   const M = minRest * 60000;
   const gapOk = (before, after) => (before === 0 || before >= M) && (after === 0 || after >= M);
@@ -137,6 +148,9 @@ async function referenceTimes(svc, day) {
   const limit = Date.now() + MIN_NOTICE * 60000;
 
   for (const st of staff) {
+    const h = effHours(st.id, dow(day));
+    if (!h) continue;
+    const blocks = (h.bs ? [[h.open, h.bs], [h.be, h.close]] : [[h.open, h.close]]).map(([a, b]) => [zoned(day, a), zoned(day, b)]);
     const busy = [...bookings.filter((b) => b.staff_id === st.id), ...off.filter((t) => t.staff_id === null || t.staff_id === st.id)]
       .map((x) => [+new Date(x.starts_at), +new Date(x.ends_at)])
       .sort((a, b) => a[0] - b[0]);
@@ -188,6 +202,23 @@ async function compareDay(day, label) {
   check(bad === 0, `${label}: la web coincide con el modelo de referencia en los ${services.length} servicios`, "\n      " + notes.join("\n      "));
 }
 
+/** Compara una visita combinada (varios servicios) con el modelo: suma de duraciones, limpieza del último, paso más fino. */
+async function compareCombo(day, label, list) {
+  const pseudo = {
+    duration_min: list.reduce((a, x) => a + x.duration_min, 0),
+    buffer_min: list[list.length - 1].buffer_min,
+    step_min: Math.max(5, Math.min(...list.map((x) => x.step_min))),
+  };
+  const ids = list.map((x) => x.id).join(",");
+  const api = new Set(((await api2(`/api/availability?serviceIds=${ids}&from=${day}&to=${day}`)).json?.slots ?? []).filter((x) => x.available).map((x) => x.time));
+  const ref = await referenceTimes(pseudo, day);
+  const edge = (t) => Math.abs(zoned(day, t) - (Date.now() + MIN_NOTICE * 60000)) < 120000;
+  const onlyApi = [...api].filter((t) => !ref.has(t) && !edge(t));
+  const onlyRef = [...ref].filter((t) => !api.has(t) && !edge(t));
+  check(onlyApi.length === 0 && onlyRef.length === 0, `${label}: visita de ${list.map((x) => x.name).join(" + ")} (${pseudo.duration_min} min) coincide con el modelo`, `solo web [${onlyApi.join(" ")}] · solo modelo [${onlyRef.join(" ")}]`);
+}
+const api2 = (path) => api(path);
+
 const from = todayStr();
 const slotsFor = async (serviceId, day, to = day) =>
   (await api(`/api/availability?serviceId=${serviceId}&from=${day}&to=${to}`)).json?.slots ?? [];
@@ -196,6 +227,10 @@ try {
   /* 1 ---------------------------------------------------------------- */
   section("1. Los huecos de cada servicio coinciden con el modelo de referencia (próximos 7 días)");
   for (let i = 0; i < 7; i++) await compareDay(addDays(from, i), addDays(from, i));
+  if (services.length >= 3) {
+    const combos = [services.slice(0, 2), services.slice(0, 3), [services[2], services[0]]];
+    for (const c of combos) for (let i = 1; i < 6; i++) await compareCombo(addDays(from, i), addDays(from, i), c);
+  }
 
   /* 2 ---------------------------------------------------------------- */
   section("2. Preaviso mínimo: no se ofrecen huecos que empiezan demasiado pronto");
@@ -246,7 +281,7 @@ try {
       let overlapBad = 0;
       for (const s of services) {
         const list = await slotsFor(s.id, slot.day);
-        overlapBad += list.filter((x) => x.available && overlaps(x.startsAt, s.duration_min, bk.startsAt, A.duration_min)).length;
+        overlapBad += list.filter((x) => x.available && overlaps(x.startsAt, s.duration_min + s.buffer_min, bk.startsAt, A.duration_min + A.buffer_min)).length;
       }
       check(overlapBad === 0, "ningún servicio ofrece huecos que solapen con la cita (30/45/60/120 min…)", `${overlapBad} solapes`);
 
@@ -266,6 +301,27 @@ try {
       check(w1.status === 200 && w1.json?.already === false, "se puede apuntar a la lista de espera");
       const w2 = await api("/api/waitlist", { method: "POST", ip: freshIp(), body: { serviceId: A.id, day: slot.day, name: "E2E Test", phone: "600000001" } });
       check(w2.status === 200 && w2.json?.already === true, "apuntarse dos veces no duplica");
+
+      // ficha de clienta creada
+      const cu = (await db.query(`SELECT count(*)::int AS n FROM customers WHERE phone_key = '600000000'`)).rows[0];
+      check(cu.n === 1, "se crea la ficha de la clienta (una sola por teléfono)");
+
+      // cambiar la hora a otro hueco libre
+      const other = free.find((x) => x.startsAt !== slot.startsAt && x.day !== slot.day) ?? free.find((x) => x.startsAt !== slot.startsAt);
+      if (other) {
+        const rs = await api(`/api/bookings/${bk.code}/reschedule`, { method: "POST", body: { token: bk.token, startsAt: other.startsAt } });
+        check(rs.status === 200 && rs.json?.booking?.startsAt === other.startsAt, "la clienta cambia la hora de su cita", JSON.stringify(rs));
+        const old = await slotsFor(A.id, slot.day);
+        check(old.find((x) => x.startsAt === slot.startsAt)?.available === true, "al cambiar la hora, el hueco antiguo se libera");
+        const nw = await slotsFor(A.id, other.day);
+        check(nw.find((x) => x.startsAt === other.startsAt)?.available === false, "y el nuevo queda ocupado");
+        const rrow = (await db.query(`SELECT reschedule_count, reminder_sent_at FROM bookings WHERE code = $1`, [bk.code])).rows[0];
+        check(rrow.reschedule_count === 1 && rrow.reminder_sent_at === null, "se anota el cambio y se reinicia el recordatorio");
+        // volver a la hora original para seguir con las pruebas
+        const back = await api(`/api/bookings/${bk.code}/reschedule`, { method: "POST", body: { token: bk.token, startsAt: slot.startsAt } });
+        check(back.status === 200, "se puede volver a la hora original", JSON.stringify(back));
+        await compareDay(other.day, "tras el cambio de hora");
+      }
 
       // cancelar desde el recordatorio
       const cx = await api("/api/respond", { method: "POST", body: { code: bk.code, token: bk.token, action: "cancel" } });
@@ -287,6 +343,193 @@ try {
       if (c4.json?.booking) await api("/api/respond", { method: "POST", body: { code: c4.json.booking.code, token: c4.json.booking.token, action: "cancel" } });
     }
 
+    /* 3b ------------------------------------------------------------- */
+    section("3b. Varios servicios en una visita (suma de duraciones y limpieza al final)");
+    const B = services.find((x) => x.id !== A.id);
+    if (B) {
+      const comboDur = A.duration_min + B.duration_min;
+      const comboFree = (
+        await api(`/api/availability?serviceIds=${A.id},${B.id}&from=${addDays(from, 3)}&to=${addDays(from, 16)}`)
+      ).json?.slots?.filter((x) => x.available);
+      if (!comboFree?.length) check(false, "hay huecos para la visita combinada");
+      else {
+        const cs = comboFree[0];
+        const ch = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id, B.id], staffId: null, startsAt: cs.startsAt } });
+        check(ch.status === 200 && ch.json?.durationMin === comboDur, `se bloquea la visita combinada (${comboDur} min)`, JSON.stringify(ch));
+        const cc = await api("/api/bookings", { method: "POST", body: { holdId: ch.json?.holdId, holdToken: ch.json?.holdToken, name: "E2E Test", phone: "600000002" } });
+        const cb = cc.json?.booking;
+        check(cc.status === 200 && cb, "se confirma la visita combinada", JSON.stringify(cc));
+        if (cb) {
+          check((new Date(cb.endsAt) - new Date(cb.startsAt)) / 60000 === comboDur, "dura la suma de los dos servicios");
+          const parts = (await db.query(`SELECT count(*)::int AS n FROM booking_services WHERE booking_id = $1`, [cb.id])).rows[0];
+          check(parts.n === 2, "se guardan los dos servicios con su precio y duración");
+          const bu = (await db.query(`SELECT (blocked_until - ends_at) AS buf FROM bookings WHERE id = $1`, [cb.id])).rows[0];
+          check(bu.buf !== null, "se registra el tiempo de limpieza bloqueado");
+          await api("/api/respond", { method: "POST", body: { code: cb.code, token: cb.token, action: "cancel" } });
+        }
+      }
+    }
+
+    /* 3c ------------------------------------------------------------- */
+    section("3c. Varias citas de la misma clienta y «Tus citas» (las canceladas se muestran con su estado)");
+    const pair = [free[2], free.find((x, i) => i > 3 && x.day !== free[2]?.day) ?? free[4]].filter(Boolean);
+    if (pair.length < 2) check(false, "hay dos huecos distintos para probar varias citas");
+    else {
+      const made = [];
+      for (const sl of pair) {
+        const hh = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: null, startsAt: sl.startsAt } });
+        const cf = await api("/api/bookings", { method: "POST", body: { holdId: hh.json?.holdId, holdToken: hh.json?.holdToken, name: "E2E Test", phone: "600000003" } });
+        if (cf.json?.booking) made.push(cf.json.booking);
+      }
+      check(made.length === 2, "la misma clienta puede tener dos citas a la vez", `${made.length} creadas`);
+      if (made.length === 2) {
+        const refs = [{ code: made[0].code, token: made[0].token }];
+        const mine1 = await api("/api/my-bookings", { method: "POST", body: { items: refs } });
+        const codes1 = (mine1.json?.bookings ?? []).map((b) => b.code);
+        check(codes1.includes(made[0].code) && codes1.includes(made[1].code), "«Tus citas» devuelve las dos citas con solo uno de los enlaces", JSON.stringify(codes1));
+        const one = (await db.query(`SELECT count(*)::int AS n FROM customers WHERE phone_key = '600000003'`)).rows[0];
+        check(one.n === 1, "las dos citas cuelgan de una única ficha de clienta");
+
+        await api("/api/respond", { method: "POST", body: { code: made[1].code, token: made[1].token, action: "cancel" } });
+        const mine2 = await api("/api/my-bookings", { method: "POST", body: { items: refs } });
+        const byCode = new Map((mine2.json?.bookings ?? []).map((b) => [b.code, b]));
+        check(byCode.get(made[1].code)?.status === "CANCELLED", "la cita cancelada sigue apareciendo, marcada como CANCELLED (no desaparece)");
+        check(byCode.get(made[0].code)?.status === "CONFIRMED", "la otra cita sigue confirmada");
+        const freed = await slotsFor(A.id, pair[1].day);
+        check(freed.find((x) => x.startsAt === pair[1].startsAt)?.available === true, "y el hueco de la cancelada vuelve a estar libre");
+        await api("/api/respond", { method: "POST", body: { code: made[0].code, token: made[0].token, action: "cancel" } });
+      }
+    }
+
+    /* 3d ------------------------------------------------------------- */
+    section("3d. Visita con varios servicios: tu propio bloqueo no te cierra huecos y el cambio de hueco es atómico");
+    const Bsvc = services.find((x) => x.id !== A.id);
+    if (Bsvc) {
+      const ids = [A.id, Bsvc.id];
+      const D = A.duration_min + Bsvc.duration_min;
+      const L0 = (await api(`/api/availability?serviceIds=${ids.join(",")}&from=${addDays(from, 3)}&to=${addDays(from, 12)}`)).json?.slots ?? [];
+      const avail0 = L0.filter((x) => x.available);
+      // dos huecos disponibles que se solapan entre sí (x empieza antes y termina después de que empiece s)
+      let pairXS = null;
+      for (const x of avail0) for (const sl of avail0) {
+        if (x.day === sl.day && x.startsAt < sl.startsAt && new Date(x.startsAt).getTime() + D * 60000 > new Date(sl.startsAt).getTime()) { pairXS = [x, sl]; break; }
+        if (pairXS) break;
+      }
+      if (!pairXS) check(false, "hay dos huecos solapados para probar el bloqueo propio");
+      else {
+        const [x, sl] = pairXS;
+        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: sl.startsAt } });
+        check(h.status === 200 && h.json?.durationMin === D && h.json?.blockedMin >= D, "se bloquea la visita combinada y el servidor informa de cuánto ocupa", JSON.stringify(h));
+        const without = (await api(`/api/availability?serviceIds=${ids.join(",")}&from=${x.day}&to=${x.day}`)).json?.slots ?? [];
+        check(without.find((y) => y.startsAt === x.startsAt)?.available === false, "para las demás, el hueco que se solapa con tu bloqueo aparece ocupado");
+        const withOwn = (await api(`/api/availability?serviceIds=${ids.join(",")}&from=${x.day}&to=${x.day}&holdId=${h.json?.holdId}&holdToken=${h.json?.holdToken}`)).json?.slots ?? [];
+        check(withOwn.find((y) => y.startsAt === x.startsAt)?.available === true, "para ti, ese mismo hueco sigue disponible (tu propio bloqueo no te lo cierra)");
+
+        // cambiar al hueco x: se libera el anterior en la misma operación
+        const sw = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: x.startsAt, replaceHoldId: h.json?.holdId, replaceToken: h.json?.holdToken } });
+        check(sw.status === 200 && sw.json?.holdId !== h.json?.holdId, "se puede mover el bloqueo a una hora que se solapa con la anterior", JSON.stringify(sw));
+        const old = (await db.query(`SELECT status FROM bookings WHERE id = $1`, [h.json?.holdId])).rows[0];
+        check(old?.status === "EXPIRED", "el bloqueo anterior queda liberado");
+
+        // cambio que falla: el hueco nuevo ya está ocupado → el bloqueo actual NO se pierde
+        const other = avail0.find((y) => y.day !== x.day && y.startsAt !== x.startsAt) ?? avail0[avail0.length - 1];
+        const hz = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: other.startsAt } });
+        const cz = await api("/api/bookings", { method: "POST", body: { holdId: hz.json?.holdId, holdToken: hz.json?.holdToken, name: "E2E Test", phone: "600000004" } });
+        const fail = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: other.startsAt, replaceHoldId: sw.json?.holdId, replaceToken: sw.json?.holdToken } });
+        check(fail.status === 409, "mover el bloqueo a un hueco ocupado da error", JSON.stringify(fail));
+        const kept = (await db.query(`SELECT status FROM bookings WHERE id = $1`, [sw.json?.holdId])).rows[0];
+        check(kept?.status === "HOLD", "…y el bloqueo que ya tenías sigue guardado (no te quedas sin hueco)");
+        await api(`/api/holds/${sw.json?.holdId}?token=${sw.json?.holdToken}`, { method: "DELETE" });
+        if (cz.json?.booking) await api("/api/respond", { method: "POST", body: { code: cz.json.booking.code, token: cz.json.booking.token, action: "cancel" } });
+      }
+
+      // invariante: TODO hueco que se ofrece como disponible se puede reservar (probamos una muestra repartida)
+      const sample = avail0.filter((_, i) => i % Math.max(1, Math.floor(avail0.length / 14)) === 0).slice(0, 14);
+      let notBookable = 0;
+      for (const sl of sample) {
+        const r = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: sl.startsAt } });
+        if (r.status !== 200) notBookable++;
+        else await api(`/api/holds/${r.json.holdId}?token=${r.json.holdToken}`, { method: "DELETE" });
+      }
+      check(notBookable === 0, `todo hueco ofrecido se puede reservar (${sample.length} comprobados en visitas de ${D} min)`, `${notBookable} fallaron`);
+
+      // lista de espera con varios servicios
+      const wl = await api("/api/waitlist", { method: "POST", ip: freshIp(), body: { serviceIds: ids, day: addDays(from, 5), name: "E2E Test", phone: "600000005" } });
+      const wrow = (await db.query(`SELECT service_ids FROM waitlist WHERE phone_key = '600000005'`)).rows[0];
+      check(wl.status === 200 && Array.isArray(wrow?.service_ids) && wrow.service_ids.length === 2, "la lista de espera guarda la visita completa (varios servicios)");
+    }
+
+    /* 3e ------------------------------------------------------------- */
+    section("3e. Visita en horas distintas: una cita por servicio, confirmadas de una vez (o ninguna)");
+    {
+      const Bs = services.find((x) => x.id !== A.id);
+      const slotsA = (await slotsFor(A.id, addDays(from, 3), addDays(from, 12))).filter((x) => x.available);
+      const slotsB = (await slotsFor(Bs.id, addDays(from, 3), addDays(from, 12))).filter((x) => x.available);
+      const l1 = slotsA[0];
+      const l2 = slotsB.find((x) => x.day !== l1?.day);
+      if (!l1 || !l2) check(false, "hay huecos en dos días distintos para probar la visita en horas distintas");
+      else {
+        const ip = freshIp();
+        const h1 = await api("/api/holds", { method: "POST", ip, body: { serviceIds: [A.id], staffId: null, startsAt: l1.startsAt } });
+        const h2 = await api("/api/holds", { method: "POST", ip, body: { serviceIds: [Bs.id], staffId: null, startsAt: l2.startsAt, extend: [{ holdId: h1.json?.holdId, holdToken: h1.json?.holdToken }] } });
+        check(h1.status === 200 && h2.status === 200 && h2.json?.extendedIds?.includes(h1.json?.holdId), "se bloquea la segunda hora y el servidor alarga el bloqueo de la primera", JSON.stringify(h2));
+        const exp = (await db.query(`SELECT max(hold_expires_at) - min(hold_expires_at) AS gap FROM bookings WHERE id = ANY($1::uuid[])`, [[h1.json?.holdId, h2.json?.holdId]])).rows[0];
+        check(Number(exp.gap?.seconds ?? 0) < 3 && !exp.gap?.minutes, "los dos bloqueos caducan a la vez", JSON.stringify(exp.gap));
+
+        const legs = [h1, h2].map((h) => ({ holdId: h.json?.holdId, holdToken: h.json?.holdToken }));
+        const cf = await api("/api/bookings/batch", { method: "POST", body: { legs, name: "E2E Test", phone: "600000006" } });
+        const codes = (cf.json?.bookings ?? []).map((b) => b.code);
+        check(cf.status === 200 && codes.length === 2 && new Set(codes).size === 2, "se confirman las dos citas de una vez, cada una con su código", JSON.stringify(cf.json?.error ?? codes));
+        const grp = (await db.query(`SELECT count(*)::int AS n, count(DISTINCT group_id)::int AS g, bool_and(status = 'CONFIRMED') AS ok FROM bookings WHERE id = ANY($1::uuid[])`, [legs.map((l) => l.holdId)])).rows[0];
+        check(grp.n === 2 && grp.g === 1 && grp.ok === true, "las dos citas quedan confirmadas y unidas en un mismo grupo");
+        const cust = (await db.query(`SELECT count(*)::int AS n FROM customers WHERE phone_key = '600000006'`)).rows[0];
+        check(cust.n === 1, "y cuelgan de una única ficha de clienta");
+        const again = await api("/api/bookings/batch", { method: "POST", body: { legs, name: "E2E Test", phone: "600000006" } });
+        check(again.status === 200 && (again.json?.bookings ?? []).map((b) => b.code).join() === codes.join(), "repetir la confirmación (doble clic) devuelve las mismas citas sin duplicar");
+
+        // cada cita se puede cancelar por separado; la otra sigue
+        const c1 = cf.json.bookings[0];
+        await api("/api/respond", { method: "POST", body: { code: c1.code, token: c1.token, action: "cancel" } });
+        const st = (await db.query(`SELECT status FROM bookings WHERE group_id = (SELECT group_id FROM bookings WHERE id = $1) ORDER BY starts_at`, [c1.id])).rows.map((r) => r.status);
+        check(st.join() === "CANCELLED,CONFIRMED", "cancelar una cita del grupo no cancela la otra", st.join());
+        await api("/api/respond", { method: "POST", body: { code: cf.json.bookings[1].code, token: cf.json.bookings[1].token, action: "cancel" } });
+      }
+
+      // el tope de bloqueos por IP no se come las citas hermanas (visita de 4 servicios en horas distintas)
+      const four = services.slice(0, 4);
+      const ipFix = freshIp();
+      const made = [];
+      for (let i = 0; i < four.length; i++) {
+        const sl = (await slotsFor(four[i].id, addDays(from, 4 + i), addDays(from, 4 + i))).find((x) => x.available);
+        if (!sl) continue;
+        const r = await api("/api/holds", { method: "POST", ip: ipFix, body: { serviceIds: [four[i].id], staffId: null, startsAt: sl.startsAt, extend: made.map((m) => ({ holdId: m.holdId, holdToken: m.holdToken })) } });
+        if (r.status === 200) made.push(r.json);
+      }
+      const alive = (await db.query(`SELECT count(*)::int AS n FROM bookings WHERE id = ANY($1::uuid[]) AND status = 'HOLD'`, [made.map((m) => m.holdId)])).rows[0].n;
+      check(made.length >= 3 && alive === made.length, `${made.length} bloqueos hermanos desde la misma IP siguen vivos (el tope por IP no los libera)`, `${alive}/${made.length}`);
+      for (const m of made) await api(`/api/holds/${m.holdId}?token=${m.holdToken}`, { method: "DELETE" });
+
+      // una clienta no puede tener dos citas solapadas (aunque sean con profesionales distintas)
+      const extra = (await db.query(`INSERT INTO staff (name, sort, active) VALUES ('E2E Staff', 99, true) RETURNING id`)).rows[0].id;
+      try {
+        const base = slotsA.find((x) => x.day !== l1?.day) ?? slotsA[1];
+        const p1 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: null, startsAt: base.startsAt } });
+        const c1 = await api("/api/bookings", { method: "POST", body: { holdId: p1.json?.holdId, holdToken: p1.json?.holdToken, name: "E2E Test", phone: "600000007" } });
+        const sameTime = (await slotsFor(A.id, base.day)).find((x) => x.startsAt === base.startsAt);
+        const withOther = (await api(`/api/availability?serviceIds=${A.id}&from=${base.day}&to=${base.day}&staffId=${extra}`)).json?.slots?.find((x) => x.startsAt === base.startsAt);
+        if (c1.status === 200 && withOther?.available) {
+          const p2 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: extra, startsAt: base.startsAt } });
+          const c2 = await api("/api/bookings", { method: "POST", body: { holdId: p2.json?.holdId, holdToken: p2.json?.holdToken, name: "E2E Test", phone: "600000007" } });
+          check(c2.status === 409 && c2.json?.error?.code === "CONFLICT", "la misma clienta no puede reservar a la misma hora con otra profesional", JSON.stringify(c2.json?.error ?? c2.status));
+          check(sameTime !== undefined, "(referencia) el hueco original existe");
+        } else check(false, "preparación de la prueba de citas solapadas", `c1=${c1.status} otra=${withOther?.available}`);
+        if (c1.json?.booking) await api("/api/respond", { method: "POST", body: { code: c1.json.booking.code, token: c1.json.booking.token, action: "cancel" } });
+      } finally {
+        await db.query(`DELETE FROM bookings WHERE staff_id = $1`, [extra]);
+        await db.query(`DELETE FROM staff WHERE id = $1`, [extra]);
+      }
+    }
+
     /* 4 -------------------------------------------------------------- */
     section("4. Carrera: seis personas pulsan el mismo hueco a la vez");
     const target = free[1];
@@ -303,6 +546,7 @@ try {
 } finally {
   await db.query(`DELETE FROM bookings WHERE customer_name = 'E2E Test'`);
   await db.query(`DELETE FROM waitlist WHERE name = 'E2E Test'`);
+  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007')`);
   await db.end();
 }
 

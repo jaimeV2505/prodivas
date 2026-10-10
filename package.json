@@ -2,7 +2,9 @@
   "name": "prodiva-reservas",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "node scripts/migrate.mjs",
     "test:e2e": "node scripts/e2e.mjs",
-    "vercel-build": "node scripts/migrate.mjs && next build"
+    "vercel-build": "node scripts/migrate.mjs && next build",
+    "audit:mobile": "node scripts/mobile-audit/run.cjs"
   },
   "dependencies": {
     "framer-motion": "^12.0.0",
@@ -26,6 +29,9 @@
     "@types/pg": "^8.11.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.56.0",
+    "tsx": "^4.20.0"
   }
 }

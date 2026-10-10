@@ -1,6 +1,6 @@
 import { CONFIG } from "./config";
 import { todayIn, addDays } from "./dates";
-import { fmtLong } from "./format";
+import { fmtLong, fmtPrice } from "./format";
 import type { BookingSummary } from "./bookings";
 import { enabled, logSend, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type Channel, type SendResult } from "./messaging";
 import { gsm, manageLink, siteUrl } from "./site";
@@ -20,9 +20,15 @@ export function whenWords(iso: string): string {
   return fmtLong(iso);
 }
 
-async function run(bookingId: string | null, kind: string, channel: Channel, send: () => Promise<SendResult>): Promise<boolean> {
+async function run(
+  bookingId: string | null,
+  kind: string,
+  channel: Channel,
+  send: () => Promise<SendResult>,
+  extra?: { fallbackSms?: string; fallbackPhone?: string },
+): Promise<boolean> {
   const r = await send();
-  await logSend(bookingId, kind, channel, r);
+  await logSend(bookingId, kind, channel, r, extra);
   return r.ok;
 }
 
@@ -41,7 +47,13 @@ async function toPerson(p: Person, kind: string, msg: Msg): Promise<boolean> {
   let ok = false;
   let waOk = false;
   if (p.phone && msg.wa && enabled.whatsapp()) {
-    waOk = await run(p.bookingId, kind, "whatsapp", () => sendWhatsAppTemplate(p.phone!, msg.wa!.template, msg.wa!.params, msg.wa!.buttons));
+    waOk = await run(
+      p.bookingId,
+      kind,
+      "whatsapp",
+      () => sendWhatsAppTemplate(p.phone!, msg.wa!.template, msg.wa!.params, msg.wa!.buttons),
+      { fallbackSms: gsm(msg.sms), fallbackPhone: p.phone },
+    );
     ok = ok || waOk;
   }
   if (p.phone && !waOk && enabled.sms()) {
@@ -93,13 +105,51 @@ export async function notifyBookingCreated(b: BookingSummary): Promise<void> {
     toOwner(
       b,
       "owner_new",
-      `<b>Nueva cita</b>\n${esc(b.serviceName)}\n${esc(when)}\n${esc(b.customerName ?? "")}, ${esc(b.customerPhone ?? "")}${b.notes ? `\n<i>${esc(b.notes)}</i>` : ""}`,
+      `<b>Nueva cita</b>\n${esc(b.serviceName)}\n${esc(when)}\n${esc(b.customerName ?? "")}, ${esc(b.customerPhone ?? "")}${
+        b.depositStatus === "PAID" ? `\n💳 Señal pagada: ${esc(fmtPrice(b.depositCents))}` : ""
+      }${b.notes ? `\n<i>${esc(b.notes)}</i>` : ""}`,
       `Nueva cita: ${b.customerName ?? ""}, ${when}`,
     ),
   ]);
 }
 
 /** Recordatorio con "Confirmar" y "Cancelar". Devuelve true si salió por algún canal. */
+/** Visita en horas distintas: un solo aviso a la clienta (y uno a la dueña) con todas las citas. */
+export async function notifyGroupCreated(list: BookingSummary[]): Promise<void> {
+  if (list.length === 0) return;
+  if (list.length === 1) return notifyBookingCreated(list[0]);
+  const first = list[0];
+  const link = manageLink(first.code, first.token);
+  const lines = list.map((b) => `${b.serviceName}: ${fmtLong(b.startsAt)}`);
+  const total = list.reduce((a, b) => a + b.priceCents, 0);
+  await Promise.all([
+    toCustomer(first, "created", {
+      sms: `Pro Diva: ${list.length} citas confirmadas. ${lines.join("; ")}. Gestionalas aqui: ${link}`,
+      wa: {
+        template: process.env.WA_TEMPLATE_CREATED || "cita_confirmada",
+        params: [first.customerName ?? "", list.map((b) => b.serviceName).join(" + "), list.map((b) => fmtLong(b.startsAt)).join(" · ")],
+        buttons: [{ kind: "url", suffix: `${first.code}?t=${first.token.slice(0, 12)}` }],
+      },
+      email: {
+        subject: `Tus ${list.length} citas en ${CONFIG.salon.name}`,
+        html: mailShell(
+          "¡Tus citas están confirmadas!",
+          `<p>Hola ${esc(first.customerName ?? "")}, te esperamos:</p><ul>${list.map((b) => `<li><b>${esc(b.serviceName)}</b> · ${esc(fmtLong(b.startsAt))}</li>`).join("")}</ul><p>El mismo día de cada cita te escribiremos para que confirmes que vienes.</p>`,
+          [{ label: "Ver o cancelar mis citas", href: link, primary: true }],
+        ),
+      },
+    }),
+    toOwner(
+      first,
+      "owner_new",
+      `<b>Nueva visita en ${list.length} horas distintas</b>\n${list.map((b) => `• ${esc(b.serviceName)}: ${esc(fmtLong(b.startsAt))}`).join("\n")}\n${esc(first.customerName ?? "")}, ${esc(first.customerPhone ?? "")} · ${esc(fmtPrice(total))}${
+        first.depositStatus === "PAID" ? "\n💳 Señal pagada" : ""
+      }${first.notes ? `\n<i>${esc(first.notes)}</i>` : ""}`,
+      `Nueva visita (${list.length} citas): ${first.customerName ?? ""}`,
+    ),
+  ]);
+}
+
 export async function notifyReminder(b: BookingSummary): Promise<boolean> {
   const link = manageLink(b.code, b.token);
   const words = whenWords(b.startsAt);
@@ -229,4 +279,58 @@ export async function notifyOwnerWaitlistOffered(b: BookingSummary, count: numbe
 
 export async function notifyOwnerCallback(c: { name: string; phone: string }): Promise<void> {
   await toOwner(null, "owner_callback", `📞 <b>Quiere que la llames</b>: ${esc(c.name)}, ${esc(c.phone)}`, `Llámala: ${c.name}`);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Cambio de hora, plantones y avisos libres a la dueña                */
+/* ------------------------------------------------------------------ */
+
+export async function notifyRescheduled(b: BookingSummary, oldStartsAt: string, notifyCustomer = true): Promise<void> {
+  const link = manageLink(b.code, b.token);
+  const when = fmtLong(b.startsAt);
+  const jobs: Promise<unknown>[] = [];
+  if (notifyCustomer) {
+    jobs.push(
+      toCustomer(b, "rescheduled", {
+        sms: `Pro Diva: tu cita ha cambiado a ${when} (${b.serviceName}). Si no te viene bien: ${link}`,
+        wa: {
+          // se reutiliza la plantilla de confirmación con la nueva fecha
+          template: process.env.WA_TEMPLATE_CREATED || "cita_confirmada",
+          params: [b.customerName ?? "", b.serviceName, when],
+          buttons: [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }],
+        },
+        email: {
+          subject: `Tu cita ha cambiado · ${CONFIG.salon.name}`,
+          html: mailShell("Tu cita ha cambiado de hora", `<p>Tu cita de <b>${esc(b.serviceName)}</b> es ahora:</p><p><b>${esc(when)}</b></p>`, [
+            { label: "Ver o cambiar mi cita", href: link, primary: true },
+          ]),
+        },
+      }),
+    );
+  }
+  jobs.push(
+    toOwner(
+      b,
+      "owner_rescheduled",
+      `🔁 <b>${esc(b.customerName ?? "")}</b> cambia su cita (${esc(b.serviceName)})\nDe: ${esc(fmtLong(oldStartsAt))}\nA: ${esc(when)}`,
+      `Cita cambiada: ${b.customerName ?? ""}`,
+    ),
+  );
+  await Promise.all(jobs);
+}
+
+export async function notifyOwnerRepeatOffender(b: BookingSummary, count: number): Promise<void> {
+  await toOwner(
+    b,
+    "owner_repeat_offender",
+    `⚠️ <b>${esc(b.customerName ?? "")}</b> lleva <b>${count}</b> ${count === 1 ? "plantón" : "plantones"} y acaba de reservar (${esc(fmtLong(b.startsAt))}, ${esc(b.serviceName)}).\nQuizá te interese confirmarla por teléfono: ${esc(b.customerPhone ?? "")}`,
+    `Clienta con plantones: ${b.customerName ?? ""}`,
+  );
+}
+
+/** Aviso libre a la dueña (Telegram y, si hay, email). */
+export async function notifyOwnerRaw(html: string, subject: string, bookingId: string | null = null): Promise<void> {
+  const fake = bookingId ? ({ id: bookingId } as BookingSummary) : null;
+  await toOwner(fake, "owner_raw", html, subject);
 }

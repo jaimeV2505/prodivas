@@ -10,16 +10,23 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   const parsed = z.string().uuid().safeParse(id);
   let path = "/reservar";
   if (parsed.success) {
-    const rows = await query<{ slug: string; day: string | null; source: string }>(
-      `SELECT s.slug, to_char(w.day, 'YYYY-MM-DD') AS day, w.source
-       FROM waitlist w JOIN services s ON s.id = w.service_id WHERE w.id = $1::uuid`,
+    const rows = await query<{ ids: number[]; day: string | null; source: string }>(
+      `SELECT COALESCE(w.service_ids, ARRAY[w.service_id]) AS ids, to_char(w.day, 'YYYY-MM-DD') AS day, w.source
+       FROM waitlist w WHERE w.id = $1::uuid`,
       [parsed.data],
     );
     const w = rows[0];
     if (w) {
-      const qs = new URLSearchParams({ servicio: w.slug });
-      if (w.day) qs.set("dia", w.day);
-      path = `${w.source === "app" ? "/cita" : "/reservar"}?${qs}`;
+      const slugs = await query<{ slug: string }>(
+        `SELECT slug FROM services WHERE id = ANY($1::int[]) ORDER BY array_position($1::int[], id)`,
+        [w.ids],
+      );
+      if (slugs[0]) {
+        const qs = new URLSearchParams({ servicio: slugs[0].slug });
+        if (slugs.length > 1 && w.source !== "app") qs.set("extra", slugs.slice(1).map((x) => x.slug).join(","));
+        if (w.day) qs.set("dia", w.day);
+        path = `${w.source === "app" ? "/cita" : "/reservar"}?${qs}`;
+      }
     }
   }
   return NextResponse.redirect(new URL(path, req.nextUrl.origin));

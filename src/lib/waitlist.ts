@@ -5,6 +5,7 @@ import { BookingError, type BookingSummary } from "./bookings";
 import { query } from "./db";
 import { notifyOwnerWaitlistOffered, notifyWaitlistSlot } from "./notify";
 import { phoneDigits } from "./site";
+import { loadVisit, type Visit } from "./visit";
 
 export type Part = "ANY" | "MORNING" | "AFTERNOON";
 
@@ -12,7 +13,7 @@ const isUnique = (e: unknown) => typeof e === "object" && e !== null && (e as { 
 
 /** Apunta a una persona a la lista de espera de un servicio (un día concreto o cualquiera de los próximos 14). */
 export async function joinWaitlist(input: {
-  serviceId: number;
+  serviceIds: number[];
   day: string | null;
   part: Part;
   name: string;
@@ -21,8 +22,7 @@ export async function joinWaitlist(input: {
   source: "web" | "app";
   ipHash: string;
 }): Promise<{ already: boolean; serviceName: string }> {
-  const svc = await query<{ name: string }>(`SELECT name FROM services WHERE id = $1::int AND active`, [input.serviceId]);
-  if (!svc[0]) throw new BookingError("NOT_FOUND", "Ese servicio ya no está disponible.", 404);
+  const visit = await loadVisit(input.serviceIds); // valida que existan, estén activos y sean 1 a 4
 
   const today = todayIn(CONFIG.tz);
   if (input.day && (input.day < today || input.day > addDays(today, CONFIG.maxDaysAhead))) {
@@ -33,13 +33,13 @@ export async function joinWaitlist(input: {
 
   try {
     await query(
-      `INSERT INTO waitlist (service_id, day, part, name, phone, phone_key, email, source, ip_hash)
-       VALUES ($1::int, $2::date, $3, $4, $5, $6, $7, $8, $9)`,
-      [input.serviceId, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash],
+      `INSERT INTO waitlist (service_id, service_ids, day, part, name, phone, phone_key, email, source, ip_hash)
+       VALUES ($1::int, $10::int[], $2::date, $3, $4, $5, $6, $7, $8, $9)`,
+      [visit.items[0].id, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash, visit.items.length > 1 ? visit.items.map((i) => i.id) : null],
     );
-    return { already: false, serviceName: svc[0].name };
+    return { already: false, serviceName: visit.name };
   } catch (e) {
-    if (isUnique(e)) return { already: true, serviceName: svc[0].name }; // ya estaba apuntada
+    if (isUnique(e)) return { already: true, serviceName: visit.name }; // ya estaba apuntada
     throw e;
   }
 }
@@ -66,37 +66,40 @@ export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<
     phone: string;
     email: string | null;
     part: string;
-    duration_min: number;
-    step_min: number;
-    service_name: string;
+    service_id: number;
+    service_ids: number[] | null;
   }>(
-    `SELECT w.id, w.name, w.phone, w.email, w.part, s.duration_min, COALESCE(s.slot_step_min, s.duration_min) AS step_min, s.name AS service_name
-     FROM waitlist w JOIN services s ON s.id = w.service_id AND s.active
+    `SELECT w.id, w.name, w.phone, w.email, w.part, w.service_id, w.service_ids
+     FROM waitlist w
      WHERE w.status = 'ACTIVE' AND (w.day = $1::date OR (w.day IS NULL AND $1::date <= $2::date + 14))
      ORDER BY w.created_at LIMIT 40`,
     [freedDay, today],
   );
 
   const cache = new Map<string, SlotRow[]>();
+  const visits = new Map<string, Visit | null>();
   let notified = 0;
   for (const w of entries) {
     if (notified >= maxPeople) break;
-    const key = `${w.duration_min}:${w.step_min}`;
+    const ids = w.service_ids && w.service_ids.length ? w.service_ids : [w.service_id];
+    const vkey = ids.join(",");
+    if (!visits.has(vkey)) visits.set(vkey, await loadVisit(ids).catch(() => null)); // un servicio dado de baja: se salta
+    const visit = visits.get(vkey);
+    if (!visit) continue;
+
+    const key = `${visit.durationMin}:${visit.stepMin}:${visit.bufferMin}`;
     let rows = cache.get(key);
     if (!rows) {
-      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: w.duration_min, stepMin: w.step_min });
+      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: visit.durationMin, bufferMin: visit.bufferMin, stepMin: visit.stepMin });
       cache.set(key, rows);
     }
-    const dur = w.duration_min * 60_000;
+    const dur = (visit.durationMin + visit.bufferMin) * 60_000;
     const fit = rows.find((r) => {
       const t = new Date(r.startsAt).getTime();
       return r.available && partOk(w.part, r) && t < freedEnd && t + dur > freedStart;
     });
     if (!fit) continue;
-    const ok = await notifyWaitlistSlot(
-      { id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: w.service_name },
-      fit.startsAt,
-    );
+    const ok = await notifyWaitlistSlot({ id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: visit.name }, fit.startsAt);
     if (ok) {
       await query(`UPDATE waitlist SET status = 'NOTIFIED', notified_at = now(), notified_slot = $2::timestamptz WHERE id = $1::uuid`, [w.id, fit.startsAt]);
       notified++;

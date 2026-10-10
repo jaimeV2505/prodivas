@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import AdminNav from "@/components/AdminNav";
 import AutoRefresh from "@/components/AutoRefresh";
+import StatusTag from "@/components/StatusTag";
 import { isAdmin } from "@/lib/auth";
 import { CONFIG } from "@/lib/config";
 import { addDays, isDay, todayIn } from "@/lib/dates";
@@ -11,7 +13,7 @@ import {
   cancelBookingAction,
   createManualAction,
   login,
-  logout,
+  attendanceAction,
   removeTimeOffAction,
   removeWaitlistAction,
   doneCallbackAction,
@@ -35,6 +37,15 @@ type Row = {
   staff_name: string;
   customer_response: string | null;
   reminder_sent_at: string | null;
+  attendance: string | null;
+  deposit_status: string;
+  deposit_cents: number;
+  no_shows: number | null;
+  customer_id: number | null;
+  started: boolean;
+  cancel_reason: string | null;
+  cancelled_at: string | null;
+  start_iso?: string;
 };
 type WaitRow = { id: string; day: string | null; part: string; name: string; phone: string; status: string; service_name: string };
 type CallRow = { id: number; name: string; phone: string; created: string };
@@ -72,16 +83,22 @@ export default async function AdminPage({
     query<Row>(
       `SELECT b.id, b.code, b.status, b.source,
               to_char(b.starts_at AT TIME ZONE $2::text, 'HH24:MI') AS t_start,
-              to_char(b.ends_at   AT TIME ZONE $2::text, 'HH24:MI') AS t_end,
+              to_char(b.ends_at   AT TIME ZONE $2::text, 'HH24:MI') AS t_end, b.starts_at AS start_iso,
               b.customer_name, b.customer_phone, b.notes, b.customer_response, b.reminder_sent_at,
-              s.name AS service_name, s.price_cents, st.name AS staff_name
+              b.attendance, b.deposit_status, b.deposit_cents, b.customer_id, c.no_show_count AS no_shows, b.cancel_reason,
+              to_char(b.cancelled_at AT TIME ZONE $2::text, 'DD/MM HH24:MI') AS cancelled_at,
+              (b.starts_at <= now() + interval '3 hours') AS started,
+              COALESCE((SELECT string_agg(bs.name, ' + ' ORDER BY bs.position) FROM booking_services bs WHERE bs.booking_id = b.id), s.name) AS service_name,
+              COALESCE((SELECT SUM(bs.price_cents)::int FROM booking_services bs WHERE bs.booking_id = b.id), s.price_cents) AS price_cents,
+              st.name AS staff_name
        FROM bookings b
        JOIN services s ON s.id = b.service_id
        JOIN staff st ON st.id = b.staff_id
+       LEFT JOIN customers c ON c.id = b.customer_id
        WHERE (b.starts_at AT TIME ZONE $2::text)::date = $1::date
-         AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()) OR ($3::boolean AND b.status = 'CANCELLED'))
+         AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()) OR (NOT $3::boolean AND b.status = 'CANCELLED'))
        ORDER BY b.starts_at`,
-      [day, CONFIG.tz, sp.c === "1"],
+      [day, CONFIG.tz, sp.c === "0"],
     ),
     query<{ id: number; name: string; duration_min: number }>(
       `SELECT id, name, duration_min FROM services WHERE active ORDER BY sort, id`,
@@ -111,32 +128,31 @@ export default async function AdminPage({
   ]);
 
   const confirmed = bookings.filter((b) => b.status === "CONFIRMED");
+  const cancelledCount = bookings.filter((b) => b.status === "CANCELLED").length;
   const revenue = confirmed.reduce((a, b) => a + b.price_cents, 0);
 
   return (
     <main className="container admin">
       <AutoRefresh />
-      <header className="admin__bar">
-        <h1>Agenda</h1>
-        <div className="admin__bar-actions">
-          <Link className="btn btn--ghost btn--sm" href="/admin/ajustes">Ajustes</Link>
-          <form action={logout}><button className="btn btn--ghost btn--sm" type="submit">Salir</button></form>
-        </div>
-      </header>
+      <AdminNav active="dia" />
 
       {sp.err && <p className="notice notice--error" role="alert">{sp.err}</p>}
 
       <nav className="admin__days" aria-label="Cambiar de día">
-        <Link className="btn btn--ghost btn--sm" href={`/admin?d=${addDays(day, -1)}`}>Día anterior</Link>
-        <strong>{fmtDayLabel(day)}{day === today ? " (hoy)" : ""}</strong>
-        <Link className="btn btn--ghost btn--sm" href={`/admin?d=${addDays(day, 1)}`}>Día siguiente</Link>
-        {day !== today && <Link className="btn btn--ghost btn--sm" href="/admin">Ir a hoy</Link>}
+        <Link className="btn btn--ghost btn--icon" href={`/admin?d=${addDays(day, -1)}`} aria-label="Día anterior">‹</Link>
+        <strong className="admin__date">{fmtDayLabel(day)}{day === today ? " (hoy)" : ""}</strong>
+        <Link className="btn btn--ghost btn--icon" href={`/admin?d=${addDays(day, 1)}`} aria-label="Día siguiente">›</Link>
+        {day !== today && <Link className="btn btn--ghost btn--sm admin__today" href="/admin">Ir a hoy</Link>}
       </nav>
 
       <p className="muted">
         {confirmed.length} {confirmed.length === 1 ? "cita" : "citas"} · {fmtPrice(revenue)} previstos
         {" · "}
-        <Link href={`/admin?d=${day}${sp.c === "1" ? "" : "&c=1"}`}>{sp.c === "1" ? "Ocultar canceladas" : "Mostrar canceladas"}</Link>
+        {sp.c === "0" ? (
+          <Link href={`/admin?d=${day}`}>Mostrar canceladas</Link>
+        ) : (
+          <Link href={`/admin?d=${day}&c=0`}>{cancelledCount > 0 ? `${cancelledCount} cancelada${cancelledCount === 1 ? "" : "s"} · ocultar` : "Ocultar canceladas"}</Link>
+        )}
       </p>
 
       {bookings.length === 0 && <p className="panel muted">No hay citas este día.</p>}
@@ -149,6 +165,7 @@ export default async function AdminPage({
               <span>
                 {b.status === "HOLD" ? "Una clienta está reservando este hueco…" : b.customer_name}
                 {b.staff_name && staff.length > 1 ? ` · ${b.staff_name}` : ""}
+                {(b.no_shows ?? 0) >= 2 && <b className="warn-inline"> · ⚠ {b.no_shows} plantones</b>}
               </span>
               {b.customer_phone && (
                 <span>
@@ -159,15 +176,45 @@ export default async function AdminPage({
               {b.notes && <em>{b.notes}</em>}
             </div>
             <div className="agenda__side">
-              <span className={`badge badge--${b.status.toLowerCase()}`}>
-                {b.status === "CONFIRMED" ? (b.source === "admin" ? "Manual" : "Online") : b.status === "CANCELLED" ? "Cancelada" : "En proceso"}
-              </span>
-              {b.status === "CONFIRMED" && (
+              {b.status === "CANCELLED" ? (
+                <>
+                  <StatusTag status={b.status} startsAt={b.start_iso ?? ""} cancelReason={b.cancel_reason ?? "customer"} />
+                  {b.cancelled_at && <small className="muted">el {b.cancelled_at}</small>}
+                </>
+              ) : (
+                <span className={`badge badge--${b.status.toLowerCase()}`}>
+                  {b.status === "CONFIRMED" ? (b.source === "admin" ? "Manual" : "Online") : "En proceso"}
+                </span>
+              )}
+              {b.deposit_status === "PAID" && <span className="badge badge--ok">Señal pagada</span>}
+              {b.deposit_status === "PENDING" && <span className="badge badge--warn">Pagando señal</span>}
+              {b.deposit_status === "FORFEITED" && <span className="badge badge--cancelled">Señal retenida</span>}
+              {b.deposit_status === "REFUNDED" && <span className="badge badge--cancelled">Señal devuelta</span>}
+              {b.attendance === "SHOWED" && <span className="badge badge--ok">Vino</span>}
+              {b.attendance === "NO_SHOW" && <span className="badge badge--noshow">No vino</span>}
+              {b.status === "CONFIRMED" && !b.attendance && (
                 <span className={`badge ${b.customer_response === "CONFIRMED" ? "badge--ok" : b.reminder_sent_at ? "badge--warn" : ""}`}>
                   {b.customer_response === "CONFIRMED" ? "Ha confirmado" : b.reminder_sent_at ? "Sin respuesta" : "Recordatorio pendiente"}
                 </span>
               )}
-              {b.status !== "CANCELLED" && (
+              {b.status === "CONFIRMED" && !b.attendance && b.started && (
+                <div className="agenda__att">
+                  <form action={attendanceAction}>
+                    <input type="hidden" name="id" value={b.id} />
+                    <input type="hidden" name="value" value="SHOWED" />
+                    <input type="hidden" name="next" value={`/admin?d=${day}`} />
+                    <button className="btn btn--primary btn--sm" type="submit">Llegó</button>
+                  </form>
+                  <form action={attendanceAction}>
+                    <input type="hidden" name="id" value={b.id} />
+                    <input type="hidden" name="value" value="NO_SHOW" />
+                    <input type="hidden" name="next" value={`/admin?d=${day}`} />
+                    <button className="btn btn--ghost btn--sm" type="submit">No vino</button>
+                  </form>
+                </div>
+              )}
+              {b.status !== "HOLD" && <Link className="btn btn--ghost btn--sm" href={`/admin/cita/${b.id}`}>Detalle</Link>}
+              {b.status !== "CANCELLED" && b.status !== "HOLD" && !b.attendance && (
                 <form action={cancelBookingAction}>
                   <input type="hidden" name="id" value={b.id} />
                   <input type="hidden" name="day" value={day} />

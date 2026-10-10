@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { preload } from "react-dom";
 import { Clock, Instagram, MapPin, MessageCircle, Phone } from "lucide-react";
 import HowItWorks from "@/components/HowItWorks";
 import MobileCta from "@/components/MobileCta";
@@ -10,6 +11,7 @@ import ServiceReel, { type ReelGroup } from "@/components/ServiceReel";
 import SiteHeader from "@/components/SiteHeader";
 import TransitionLink from "@/components/TransitionLink";
 import { CONFIG } from "@/lib/config";
+import { HERO_PHOTO } from "@/lib/media";
 import { todayIn } from "@/lib/dates";
 import { siteUrl } from "@/lib/site";
 import { query } from "@/lib/db";
@@ -66,6 +68,7 @@ function groupHours(rows: HourRow[]): { label: string; hours: string }[] {
 }
 
 export default async function Home() {
+  if (HERO_PHOTO) preload(HERO_PHOTO.src, { as: "image", fetchPriority: "high" }); // la foto de la portada se pide cuanto antes
   const [services, hoursRows] = await Promise.all([
     query<ServiceRow>(
       `SELECT id, slug, name, category, description, duration_min AS "durationMin", price_cents AS "priceCents"

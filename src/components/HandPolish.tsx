@@ -3,7 +3,7 @@
 import { Check } from "lucide-react";
 import { POLISH, type Polish } from "@/lib/polish";
 
-type Props = { value: Polish | null; onChange: (p: Polish) => void };
+type Props = { value: Polish | null; onChange: (p: Polish) => void; showHand?: boolean };
 
 // Dedos: [centro x, y de la punta, alto]. Pulgar aparte (rotado).
 const FINGERS: [number, number, number][] = [
@@ -14,10 +14,12 @@ const FINGERS: [number, number, number][] = [
 ];
 
 /** Mano en SVG: al elegir un esmalte, las uñas cambian de color en ola. */
-export default function HandPolish({ value, onChange }: Props) {
+export default function HandPolish({ value, onChange, showHand = true }: Props) {
   const shown = value?.hex ?? POLISH[0].hex;
   return (
-    <div className="hand">
+    <div className={`hand ${showHand ? "" : "hand--solo"}`}>
+      {!showHand && <p className="hand__title">Pruébalo en tus uñas</p>}
+      {showHand && (
       <svg viewBox="0 0 360 440" className="hand__svg" role="img" aria-label={`Mano con esmalte ${value?.name ?? POLISH[0].name}`}>
         <g className="hand__skin">
           {FINGERS.map(([cx, top, h], i) => (
@@ -39,6 +41,7 @@ export default function HandPolish({ value, onChange }: Props) {
           <ellipse key={shown} className="hand__gloss" cx="76" cy="286" rx="3.5" ry="10" fill="#fff" opacity=".45" />
         </g>
       </svg>
+      )}
 
       <div className="hand__picker" role="radiogroup" aria-label="Elige tu color de esmalte">
         {POLISH.map((p) => {

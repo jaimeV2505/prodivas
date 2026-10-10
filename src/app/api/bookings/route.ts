@@ -2,7 +2,7 @@ import { after, type NextRequest } from "next/server";
 import { z } from "zod";
 import { BookingError, confirmBooking } from "@/lib/bookings";
 import { respond } from "@/lib/http";
-import { notifyBookingCreated } from "@/lib/notify";
+import { notifyBookingCreated, notifyOwnerRepeatOffender } from "@/lib/notify";
 import { markWaitlistBooked } from "@/lib/waitlist";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
     if (b.website) throw new BookingError("INVALID", "No hemos podido procesar la solicitud.");
-    const booking = await confirmBooking({
+    const r = await confirmBooking({
       holdId: b.holdId,
       holdToken: b.holdToken,
       name: b.name,
@@ -32,10 +32,13 @@ export async function POST(req: NextRequest) {
       email: b.email || null,
       notes: b.notes || null,
     });
+    // Con señal pendiente se devuelve el enlace de pago; los avisos salen cuando Stripe confirma el pago
+    if (r.checkoutUrl) return { booking: r.booking, checkoutUrl: r.checkoutUrl };
     after(async () => {
-      await notifyBookingCreated(booking);
-      await markWaitlistBooked(booking.customerPhone, booking.startsAt);
+      await notifyBookingCreated(r.booking);
+      await markWaitlistBooked(r.booking.customerPhone, r.booking.startsAt);
+      if (r.noShowCount >= Number(process.env.NO_SHOW_ALERT ?? 2)) await notifyOwnerRepeatOffender(r.booking, r.noShowCount);
     });
-    return { booking };
+    return { booking: r.booking };
   });
 }

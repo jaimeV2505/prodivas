@@ -5,6 +5,8 @@ export const CONFIG = {
   holdMinutes: Number(process.env.HOLD_MINUTES ?? 10),
   cancelNoticeHours: Number(process.env.CANCEL_NOTICE_HOURS ?? 24),
   maxHoldsPerIp: 3,
+  /** Citas futuras como máximo por teléfono (evita acaparar huecos). */
+  maxActiveBookings: Number(process.env.MAX_ACTIVE_BOOKINGS ?? 6),
   salon: {
     name: "Pro Diva",
     city: "Melide",

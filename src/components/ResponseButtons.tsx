@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useState } from "react";
 import { Check, X } from "lucide-react";
 
-type Props = { code: string; token: string; initial: "pending" | "confirmed" | "cancelled" };
+type Props = { code: string; token: string; initial: "pending" | "confirmed" | "cancelled"; warnDeposit?: string };
 
 /** Dos botones enormes: lo bastante claros para cualquier edad. */
-export default function ResponseButtons({ code, token, initial }: Props) {
+export default function ResponseButtons({ code, token, initial, warnDeposit }: Props) {
   const [state, setState] = useState(initial);
   const [busy, setBusy] = useState<"confirm" | "cancel" | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +56,7 @@ export default function ResponseButtons({ code, token, initial }: Props) {
   return (
     <div className="resp">
       {error && <p className="notice notice--error" role="alert">{error}</p>}
+      {warnDeposit && <p className="notice notice--info">{warnDeposit}</p>}
       <button type="button" className="resp__btn resp__btn--yes" onClick={() => send("confirm")} disabled={busy !== null}>
         <Check size={30} aria-hidden="true" /> {busy === "confirm" ? "Guardando…" : "Sí, voy a ir"}
       </button>

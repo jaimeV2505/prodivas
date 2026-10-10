@@ -6,31 +6,48 @@ import { useReducedMotion } from "framer-motion";
 type Props = { words: string[]; accent?: number[] };
 
 /**
- * Titular que "respira": al mover el ratón, las palabras cercanas se engrosan y las lejanas se afinan
- * (eje de grosor de la fuente variable). En táctil y con "reducir movimiento" se queda quieto.
+ * Titular del hero. Entrada: las palabras aparecen con un fundido suave (de borroso a nítido, subiendo un poco).
+ * Con el ratón: un brillo rosa muy suave se desliza por las palabras en magenta ("Pro Diva,"). En móvil y con
+ * "reducir movimiento" se queda quieto.
  */
 export default function BreathingTitle({ words, accent = [] }: Props) {
   const reduce = useReducedMotion();
-  const refs = useRef<(HTMLSpanElement | null)[]>([]);
+  const els = useRef<(HTMLSpanElement | null)[]>([]);
+  const target = useRef<number[]>([]);
+  const cur = useRef<number[]>([]);
   const raf = useRef(0);
+
+  const tick = () => {
+    let moving = false;
+    for (const i of accent) {
+      const el = els.current[i];
+      if (!el) continue;
+      const c = cur.current[i] ?? 50;
+      const t = target.current[i] ?? 50;
+      const n = c + (t - c) * 0.07; // se acerca despacio: movimiento suave
+      cur.current[i] = n;
+      el.style.setProperty("--glow", `${n.toFixed(1)}%`);
+      if (Math.abs(t - n) > 0.3) moving = true;
+    }
+    raf.current = moving ? requestAnimationFrame(tick) : 0;
+  };
+  const go = () => {
+    if (!raf.current) raf.current = requestAnimationFrame(tick);
+  };
 
   function move(e: PointerEvent<HTMLHeadingElement>) {
     if (reduce || e.pointerType !== "mouse") return;
-    const { clientX: x, clientY: y } = e;
-    cancelAnimationFrame(raf.current);
-    raf.current = requestAnimationFrame(() => {
-      for (const el of refs.current) {
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
-        const k = Math.max(0, 1 - d / 280);
-        el.style.fontVariationSettings = `"wght" ${Math.round(520 + 280 * k)}`;
-      }
-    });
+    for (const i of accent) {
+      const el = els.current[i];
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      target.current[i] = Math.max(-20, Math.min(120, ((e.clientX - r.left) / r.width) * 100));
+    }
+    go();
   }
   function leave() {
-    cancelAnimationFrame(raf.current);
-    for (const el of refs.current) if (el) el.style.fontVariationSettings = "";
+    for (const i of accent) target.current[i] = 50;
+    go();
   }
 
   return (
@@ -40,7 +57,7 @@ export default function BreathingTitle({ words, accent = [] }: Props) {
           <span className={`hero__word ${accent.includes(i) ? "hero__word--accent" : ""}`}>
             <span
               ref={(el) => {
-                refs.current[i] = el;
+                els.current[i] = el;
               }}
               style={{ ["--i" as string]: i } as CSSProperties}
             >

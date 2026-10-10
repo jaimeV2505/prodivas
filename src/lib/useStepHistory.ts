@@ -24,6 +24,7 @@ export function useStepHistory(step: string, goBack: () => boolean): () => void 
       window.history.replaceState({ ...(window.history.state ?? {}), pdStep: 0 }, "");
       return;
     }
+    window.scrollTo(0, 0); // cada paso nuevo se ve desde arriba, no a mitad de página
     if (popping.current) {
       popping.current = false;
       return;

@@ -5,6 +5,8 @@ import { Bell, Check } from "lucide-react";
 
 type Props = {
   serviceId: number;
+  /** Si la visita lleva varios servicios, todos (el primero es el principal). */
+  serviceIds?: number[];
   day: string | null;
   dayLabel?: string;
   source: "web" | "app";
@@ -12,7 +14,7 @@ type Props = {
 };
 
 /** "Avísame si se libera un hueco": nombre + teléfono, sin cuenta. */
-export default function WaitlistForm({ serviceId, day, dayLabel, source, startOpen = false }: Props) {
+export default function WaitlistForm({ serviceId, serviceIds, day, dayLabel, source, startOpen = false }: Props) {
   const easy = source === "app";
   const [open, setOpen] = useState(startOpen);
   const [form, setForm] = useState({ name: "", phone: "", email: "", part: "ANY", website: "" });
@@ -27,7 +29,7 @@ export default function WaitlistForm({ serviceId, day, dayLabel, source, startOp
       const r = await fetch("/api/waitlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceId, day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, website: form.website }),
+        body: JSON.stringify({ serviceIds: serviceIds && serviceIds.length ? serviceIds : [serviceId], day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, website: form.website }),
       });
       const j = await r.json();
       if (!r.ok) {

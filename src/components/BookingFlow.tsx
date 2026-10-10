@@ -5,10 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
 import { daysInMonth } from "@/lib/dates";
+import { saveBooking } from "@/lib/myBookings";
+import type { Trend } from "@/lib/trends";
 import { useStepHistory } from "@/lib/useStepHistory";
+import BookingAvatar, { type AvatarState } from "./BookingAvatar";
 import PetalBurst from "./PetalBurst";
 import WaitlistForm from "./WaitlistForm";
-import { fmtDayLabel, fmtDuration, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
+import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
 
 export type Service = {
   id: number;
@@ -18,6 +21,7 @@ export type Service = {
   description: string | null;
   durationMin: number;
   priceCents: number;
+  depositCents?: number;
 };
 export type Staff = { id: number; name: string };
 type Slot = { day: string; time: string; startsAt: string; available: boolean; staffIds: number[] };
@@ -27,6 +31,8 @@ type Hold = {
   staffId: number;
   staffName: string;
   startsAt: string;
+  endsAt: string;
+  blockedMin: number;
   deadline: number;
   total: number;
 };
@@ -40,6 +46,8 @@ type Done = {
   priceCents: number;
 };
 type Step = "service" | "staff" | "time" | "details" | "done";
+/** Visita en horas distintas: una cita por servicio, cada una con su día, su hora y su bloqueo. */
+type Leg = { service: Service; day: string | null; hold: Hold | null };
 
 type Props = {
   services: Service[];
@@ -48,21 +56,22 @@ type Props = {
   initialDay?: string;
   initialTime?: string;
   initialColor?: string;
+  initialExtras?: string[];
+  trends?: Trend[];
   today: string;
   maxDate: string;
   whatsapp: string;
   address: string;
+  depositEnabled?: boolean;
+  refundHours?: number;
 };
 
 const EASE_OUT: [number, number, number, number] = [0.23, 1, 0.32, 1];
 const WEEK = ["L", "M", "X", "J", "V", "S", "D"];
 
-function icsHref(d: Done, address: string): string {
+function icsHref(list: Done[], address: string): string {
   const f = (iso: string) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
-  const lines = [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//Pro Diva//Reservas//ES",
+  const events = list.flatMap((d) => [
     "BEGIN:VEVENT",
     `UID:${d.code}@prodiva-melide`,
     `DTSTAMP:${f(new Date().toISOString())}`,
@@ -71,12 +80,12 @@ function icsHref(d: Done, address: string): string {
     `SUMMARY:${d.serviceName} en Pro Diva`,
     `LOCATION:${address.replace(/,/g, "\\,")}`,
     "END:VEVENT",
-    "END:VCALENDAR",
-  ];
+  ]);
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Pro Diva//Reservas//ES", ...events, "END:VCALENDAR"];
   return "data:text/calendar;charset=utf-8," + encodeURIComponent(lines.join("\r\n"));
 }
 
-export default function BookingFlow({ services, staff, initialSlug, initialDay, initialTime, initialColor, today, maxDate, whatsapp, address }: Props) {
+export default function BookingFlow({ services, staff, initialSlug, initialDay, initialTime, initialColor, initialExtras, trends = [], today, maxDate, whatsapp, address, depositEnabled = false, refundHours = 24 }: Props) {
   const reduce = useReducedMotion();
   const multiStaff = staff.length > 1;
   const stepOrder: Step[] = multiStaff ? ["service", "staff", "time", "details"] : ["service", "time", "details"];
@@ -93,22 +102,57 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const [step, setStep] = useState<Step>(initialService ? (multiStaff && !initialTime ? "staff" : "time") : "service");
   const [month, setMonth] = useState((initialDay && initialDay >= today ? initialDay : today).slice(0, 7));
   const [slots, setSlots] = useState<Slot[] | null>(null);
-  const [day, setDay] = useState<string | null>(initialDay && initialDay >= today ? initialDay : null);
-  const [hold, setHold] = useState<Hold | null>(null);
+  const [dayT, setDayT] = useState<string | null>(initialDay && initialDay >= today ? initialDay : null);
+  const [holdT, setHoldT] = useState<Hold | null>(null);
   const [busySlot, setBusySlot] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "info"; text: string } | null>(null);
   const [now, setNow] = useState(0);
   const [form, setForm] = useState({ name: "", phone: "", email: "", notes: initialColor ? `Color: ${initialColor}` : "", consent: false, website: "" });
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<Done | null>(null);
+  const [doneAll, setDoneAll] = useState<Done[]>([]);
+  const [extras, setExtras] = useState<Service[]>(() =>
+    (initialExtras ?? [])
+      .map((slug) => services.find((x) => x.slug === slug))
+      .filter((x): x is Service => !!x && x.id !== initialService?.id)
+      .slice(0, 3),
+  );
+  const [addOpen, setAddOpen] = useState(false);
+
+  // Visita en horas distintas ("apart"): una cita por servicio. Si no, todos seguidos en un solo bloque.
+  const [apart, setApart] = useState(false);
+  const [legs, setLegs] = useState<Leg[]>([]);
+  const [activeLeg, setActiveLeg] = useState(0);
+  const cur: Leg | undefined = apart ? legs[activeLeg] : undefined;
+  // `hold` y `day` son los de la cita que se está eligiendo ahora (la única, o la activa si van en horas distintas)
+  const hold: Hold | null = apart ? cur?.hold ?? null : holdT;
+  const day: string | null = apart ? cur?.day ?? null : dayT;
+  const setDay = (d: string | null) => {
+    if (apart) setLegs((ls) => ls.map((l, i) => (i === activeLeg ? { ...l, day: d } : l)));
+    else setDayT(d);
+  };
+
+  // Servicios de la visita (hasta 4) y los que se consultan ahora al pedir huecos
+  const visitServices = useMemo(() => (apart ? legs.map((l) => l.service) : service ? [service, ...extras] : []), [apart, legs, service, extras]);
+  const availServices = apart ? (cur ? [cur.service] : []) : visitServices;
+  const availKey = availServices.map((x) => x.id).join(",");
+  const totalDuration = visitServices.reduce((a, x) => a + x.durationMin, 0);
+  const totalPrice = visitServices.reduce((a, x) => a + x.priceCents, 0);
+  const totalDeposit = visitServices.reduce((a, x) => a + (x.depositCents ?? 0), 0);
+  const needsDeposit = depositEnabled && totalDeposit > 0;
 
   /* ---------- disponibilidad ---------- */
-  const refresh = useCallback(async () => {
-    if (!service) return;
+  const refresh = useCallback(async (h?: Hold | null) => {
+    if (!availKey) return;
+    const own = h === undefined ? holdRef.current : h; // el bloqueo propio no cuenta como "ocupado" para ella
     const from = `${month}-01`;
     const to = `${month}-${String(daysInMonth(month)).padStart(2, "0")}`;
-    const qs = new URLSearchParams({ serviceId: String(service.id), from, to });
+    const qs = new URLSearchParams({ serviceIds: availKey, from, to });
     if (staffChoice !== null) qs.set("staffId", String(staffChoice));
+    if (own) {
+      qs.set("holdId", own.holdId);
+      qs.set("holdToken", own.holdToken);
+    }
     try {
       const r = await fetch(`/api/availability?${qs}`, { cache: "no-store" });
       if (!r.ok) throw new Error("bad status");
@@ -117,12 +161,12 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     } catch {
       setNotice((n) => n ?? { tone: "error", text: "No pudimos cargar los huecos. Revisa tu conexión." });
     }
-  }, [service, staffChoice, month]);
+  }, [availKey, staffChoice, month]);
 
   // Carga + sondeo cada 15 s + al volver a la pestaña: los huecos que otra persona
   // bloquea aparecen candados casi en tiempo real.
   useEffect(() => {
-    if (step !== "time" || !service) return;
+    if (step !== "time" || !availKey) return;
     void refresh();
     const id = setInterval(() => void refresh(), 15000);
     const onVis = () => document.visibilityState === "visible" && void refresh();
@@ -131,7 +175,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [step, service, refresh]);
+  }, [step, availKey, refresh]);
 
   // Llegada desde un hueco del hero ("Hoy 17:15"): se bloquea solo y se pasa directo a los datos
   const autoPicked = useRef(false);
@@ -162,13 +206,22 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       .sort()
       .find((d) => dayInfo[d].free > 0);
     setDay(first ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slots, dayInfo, day]);
 
-  /* ---------- bloqueo (hold) ---------- */
+  /* ---------- bloqueos (hold) ---------- */
   const holdRef = useRef<Hold | null>(null);
   useEffect(() => {
     holdRef.current = hold;
   }, [hold]);
+
+  // Todos los bloqueos vivos (uno, o uno por cita si van en horas distintas)
+  const allHolds = useMemo(() => (apart ? legs.flatMap((l) => (l.hold ? [l.hold] : [])) : holdT ? [holdT] : []), [apart, legs, holdT]);
+  const allHoldsRef = useRef<Hold[]>([]);
+  useEffect(() => {
+    allHoldsRef.current = allHolds;
+  }, [allHolds]);
+  const allHeld = apart ? legs.length > 0 && legs.every((l) => !!l.hold) : !!holdT;
 
   const release = useCallback((h: Hold) => {
     return fetch(`/api/holds/${h.holdId}?token=${encodeURIComponent(h.holdToken)}`, {
@@ -177,73 +230,120 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     }).catch(() => {});
   }, []);
 
+  const clearAllHolds = () => {
+    setHoldT(null);
+    setLegs((ls) => ls.map((l) => (l.hold ? { ...l, hold: null } : l)));
+  };
+  // Libera todos los bloqueos en el servidor y los olvida
   const dropHold = () => {
-    if (hold) {
-      void release(hold);
-      setHold(null);
-    }
+    for (const h of allHoldsRef.current) void release(h);
+    allHoldsRef.current = [];
+    holdRef.current = null;
+    clearAllHolds();
   };
 
-  // Si cierra o recarga la pestaña, liberamos el hueco al instante
+  // Si cierra o recarga la pestaña, liberamos los huecos al instante
   useEffect(() => {
     const onHide = () => {
-      if (holdRef.current) void release(holdRef.current);
+      for (const h of allHoldsRef.current) void release(h);
     };
     window.addEventListener("pagehide", onHide);
     return () => window.removeEventListener("pagehide", onHide);
   }, [release]);
 
-  // Cuenta atrás
+  // Cuenta atrás: al guardar otra hora, el servidor alarga los bloqueos hermanos, así que caducan a la vez
+  const deadline = allHolds.length ? Math.min(...allHolds.map((h) => h.deadline)) : 0;
   useEffect(() => {
-    if (!hold) return;
+    if (!deadline) return;
     setNow(Date.now());
     const id = setInterval(() => {
       const t = Date.now();
       setNow(t);
-      if (t >= hold.deadline) {
-        setHold(null);
-        setNotice({ tone: "info", text: "Se acabó el tiempo y liberamos el hueco. Elígelo de nuevo si sigue libre." });
+      if (t >= deadline) {
+        clearAllHolds();
+        setNotice({ tone: "info", text: "Se acabó el tiempo y liberamos tus huecos. Elígelos de nuevo si siguen libres." });
         setStep((s) => (s === "details" ? "time" : s));
-        void refresh();
+        void refresh(null);
       }
     }, 1000);
     return () => clearInterval(id);
-  }, [hold, refresh]);
+  }, [deadline, refresh]);
 
-  const remaining = hold ? Math.max(0, Math.ceil((hold.deadline - now) / 1000)) : 0;
+  const remaining = deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : 0;
   const mmss = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
+  const holdTotalSec = hold?.total ?? allHolds[0]?.total ?? 600;
 
   async function pickSlot(slot: Slot, advance = false) {
-    if (!service || busySlot) return;
-    if (hold?.startsAt === slot.startsAt) return;
+    if (!availServices.length || busySlot) return;
+    if (hold?.startsAt === slot.startsAt) {
+      if (advance) setStep("details");
+      return;
+    }
     setNotice(null);
     setBusySlot(slot.startsAt);
-    if (hold) {
-      await release(hold);
-      setHold(null);
-    }
+    const legIndex = activeLeg;
+    const siblings = apart ? legs.filter((l, i) => i !== legIndex && l.hold).map((l) => l.hold as Hold) : [];
     try {
+      // Si ya tenía un hueco guardado para esta cita, el servidor lo cambia por el nuevo en una sola operación:
+      // si el nuevo falla, el anterior sigue guardado (no se queda sin hueco por probar otra hora).
       const r = await fetch("/api/holds", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceId: service.id, staffId: staffChoice, startsAt: slot.startsAt }),
+        body: JSON.stringify({
+          serviceIds: availServices.map((x) => x.id),
+          staffId: staffChoice,
+          startsAt: slot.startsAt,
+          ...(hold ? { replaceHoldId: hold.holdId, replaceToken: hold.holdToken } : {}),
+          ...(siblings.length ? { extend: siblings.map((h) => ({ holdId: h.holdId, holdToken: h.holdToken })) } : {}),
+        }),
       });
       const j = await r.json();
       if (!r.ok) {
         setNotice({ tone: "error", text: j?.error?.message ?? "No pudimos bloquear ese hueco." });
         await refresh();
       } else {
-        setHold({
+        const deadlineNew = Date.now() + j.expiresInSec * 1000;
+        const next: Hold = {
           holdId: j.holdId,
           holdToken: j.holdToken,
           staffId: j.staffId,
           staffName: j.staffName,
           startsAt: slot.startsAt,
-          deadline: Date.now() + j.expiresInSec * 1000,
+          endsAt: j.endsAt,
+          blockedMin: j.blockedMin,
+          deadline: deadlineNew,
           total: j.expiresInSec,
-        });
-        if (advance) setStep("details");
-        await refresh();
+        };
+        if (apart) {
+          const ext: string[] = j.extendedIds ?? [];
+          const lost = legs.filter((l, i) => i !== legIndex && l.hold && !ext.includes(l.hold.holdId)).map((l) => l.service.name);
+          setLegs((ls) =>
+            ls.map((l, i) => {
+              if (i === legIndex) return { ...l, hold: next };
+              if (!l.hold) return l;
+              if (ext.includes(l.hold.holdId)) return { ...l, hold: { ...l.hold, deadline: deadlineNew, total: j.expiresInSec } };
+              return { ...l, hold: null }; // ese bloqueo ya había caducado
+            }),
+          );
+          if (lost.length) setNotice({ tone: "info", text: `La hora de ${lost.join(" y ")} había caducado: elígela otra vez.` });
+          // pasa sola a la siguiente cita que aún no tiene hora
+          const nextIdx = legs.findIndex((l, i) => i !== legIndex && (!l.hold || !ext.includes(l.hold.holdId)));
+          if (nextIdx >= 0) {
+            holdRef.current = null;
+            setSlots(null); // los huecos de la cita anterior no valen para la siguiente: se piden de nuevo
+            setActiveLeg(nextIdx);
+            const d = legs[nextIdx].day;
+            if (d) setMonth(d.slice(0, 7));
+          } else {
+            holdRef.current = next;
+            await refresh(next);
+          }
+        } else {
+          setHoldT(next);
+          holdRef.current = next;
+          if (advance) setStep("details");
+          await refresh(next);
+        }
       }
     } catch {
       setNotice({ tone: "error", text: "Sin conexión. Inténtalo de nuevo." });
@@ -253,11 +353,99 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   }
 
   /* ---------- navegación ---------- */
+  // En horas distintas, el primer servicio de la lista es siempre `service` (se usa en varios sitios)
+  function commitLegs(next: Leg[]) {
+    setLegs(next);
+    setService(next[0]?.service ?? null);
+  }
+  function addExtra(s: Service) {
+    if (visitServices.length >= 4 || visitServices.some((v) => v.id === s.id)) return;
+    if (apart) {
+      commitLegs([...legs, { service: s, day: null, hold: null }]); // las demás citas conservan su hueco
+    } else {
+      dropHold();
+      setExtras((e) => [...e, s]);
+    }
+    setSlots(null);
+    setAddOpen(false);
+    setNotice(null);
+  }
+  function removeService(id: number) {
+    if (visitServices.length < 2) return; // tiene que quedar al menos uno
+    if (apart) {
+      const idx = legs.findIndex((l) => l.service.id === id);
+      if (idx < 0) return;
+      if (legs[idx].hold) void release(legs[idx].hold as Hold);
+      const rest = legs.filter((_, i) => i !== idx);
+      if (rest.length === 1) {
+        // queda una sola cita: vuelve a «todo seguido» conservando su hueco
+        const only = rest[0];
+        setApart(false);
+        setLegs([]);
+        setActiveLeg(0);
+        setService(only.service);
+        setExtras([]);
+        setHoldT(only.hold);
+        setDayT(only.day);
+      } else {
+        commitLegs(rest);
+        setActiveLeg(Math.min(activeLeg > idx ? activeLeg - 1 : activeLeg, rest.length - 1));
+      }
+    } else {
+      dropHold();
+      if (service && id === service.id) {
+        const [first, ...rest] = extras;
+        if (first) {
+          setService(first);
+          setExtras(rest);
+        }
+      } else {
+        setExtras((e) => e.filter((x) => x.id !== id));
+      }
+    }
+    setSlots(null);
+    setNotice(null);
+  }
+  // «Todo seguido» ⇄ «Cada servicio a su hora»
+  function goApart() {
+    if (visitServices.length < 2) return;
+    dropHold();
+    setLegs(visitServices.map((s) => ({ service: s, day: null, hold: null })));
+    setActiveLeg(0);
+    setApart(true);
+    setSlots(null);
+    setNotice(null);
+  }
+  function goTogether() {
+    const sv = legs.map((l) => l.service);
+    dropHold();
+    setApart(false);
+    setLegs([]);
+    setActiveLeg(0);
+    setService(sv[0] ?? null);
+    setExtras(sv.slice(1));
+    setDayT(null);
+    setSlots(null);
+    setNotice(null);
+  }
+  function selectLeg(i: number) {
+    if (i === activeLeg || !legs[i]) return;
+    setActiveLeg(i);
+    setSlots(null);
+    setNotice(null);
+    const d = legs[i].day;
+    if (d) setMonth(d.slice(0, 7));
+  }
   function chooseService(s: Service) {
     dropHold();
+    setApart(false);
+    setLegs([]);
+    setActiveLeg(0);
+    setExtras([]);
+    setAddOpen(false);
     setService(s);
     setSlots(null);
-    setDay(null);
+    setDayT(null);
     setNotice(null);
     setStep(multiStaff ? "staff" : "time");
   }
@@ -266,14 +454,34 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setStaffChoice(id);
     setSlots(null);
     setDay(null);
+    setDayT(null);
+    setLegs((ls) => ls.map((l) => ({ ...l, day: null })));
     setNotice(null);
     setStep("time");
+  }
+  // Nueva cita: se conservan nombre, teléfono y email para no escribirlos otra vez
+  function reset() {
+    dropHold();
+    setApart(false);
+    setLegs([]);
+    setActiveLeg(0);
+    setService(null);
+    setExtras([]);
+    setAddOpen(false);
+    setStaffChoice(null);
+    setSlots(null);
+    setDayT(null);
+    setDone(null);
+    setDoneAll([]);
+    setNotice(null);
+    setForm((f) => ({ ...f, notes: "" }));
+    setStep("service");
   }
   // Paso anterior; devuelve true si ha cambiado de paso. El botón "Atrás" del móvil usa la misma lógica.
   function stepBack(): boolean {
     if (step === "done") {
-      window.location.assign("/");
-      return false;
+      reset(); // desde la confirmación, atrás = el menú de reserva
+      return true;
     }
     const i = stepOrder.indexOf(step);
     if (i <= 0) return false;
@@ -293,42 +501,69 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setMonth(new Date(Date.UTC(y, m - 1 + delta, 1)).toISOString().slice(0, 7));
   }
 
+  // Desde el avatar: añadir un servicio a la visita con un toque
+  function addFromAvatar(slug: string): "added" | "chosen" | "already" | "full" | "missing" {
+    const s = services.find((x) => x.slug === slug);
+    if (!s) return "missing";
+    if (visitServices.some((v) => v.id === s.id)) return "already";
+    if (step === "service" || !service) {
+      chooseService(s);
+      return "chosen";
+    }
+    if (step === "done" || step === "details") return "missing";
+    if (visitServices.length >= 4) return "full";
+    addExtra(s);
+    return "added";
+  }
+
   /* ---------- confirmar ---------- */
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!hold || submitting) return;
+    if (submitting || !allHeld) return;
     setSubmitting(true);
     setNotice(null);
+    const who = { name: form.name, phone: form.phone, email: form.email, notes: form.notes, website: form.website };
     try {
-      const r = await fetch("/api/bookings", {
+      const r = await fetch(apart ? "/api/bookings/batch" : "/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          holdId: hold.holdId,
-          holdToken: hold.holdToken,
-          name: form.name,
-          phone: form.phone,
-          email: form.email,
-          notes: form.notes,
-          website: form.website,
-        }),
+        body: JSON.stringify(
+          apart
+            ? { legs: legs.map((l) => ({ holdId: (l.hold as Hold).holdId, holdToken: (l.hold as Hold).holdToken })), ...who }
+            : { holdId: (holdT as Hold).holdId, holdToken: (holdT as Hold).holdToken, ...who },
+        ),
       });
       const j = await r.json();
       if (!r.ok) {
         const code = j?.error?.code as string | undefined;
         setNotice({ tone: "error", text: j?.error?.message ?? "No pudimos confirmar la cita." });
         if (code === "SLOT_TAKEN" || code === "HOLD_EXPIRED" || code === "NOT_FOUND") {
-          setHold(null);
+          // una de las horas ya no vale: se liberan todas (el servidor no dice cuál) y se vuelve a elegir
+          dropHold();
           setStep("time");
-          void refresh();
+          void refresh(null);
+        } else if (code === "CONFLICT") {
+          setStep("time"); // coincide con otra cita suya: que cambie la hora (los huecos siguen guardados)
         }
         return;
       }
-      setDone(j.booking as Done);
-      setHold(null);
+      if (j.checkoutUrl) {
+        // Pago de la señal en Stripe: los huecos deben seguir bloqueados mientras tanto
+        holdRef.current = null;
+        allHoldsRef.current = [];
+        window.location.assign(j.checkoutUrl as string);
+        return;
+      }
+      const list = (apart ? j.bookings : [j.booking]) as Done[];
+      for (const b of list) saveBooking(b.code, b.token);
+      allHoldsRef.current = [];
+      holdRef.current = null;
+      setDoneAll(list);
+      setDone(list[0]);
+      clearAllHolds(); // confirmadas: no hay nada que liberar
       setStep("done");
     } catch {
-      setNotice({ tone: "error", text: "Sin conexión. Tu hueco sigue guardado: inténtalo otra vez." });
+      setNotice({ tone: "error", text: "Sin conexión. Tus huecos siguen guardados: inténtalo otra vez." });
     } finally {
       setSubmitting(false);
     }
@@ -353,6 +588,12 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     return g;
   }, [services]);
   const order = useMemo(() => new Map(services.map((s, i) => [s.id, i])), [services]);
+  const avatarState: AvatarState = step === "done" ? "done" : step === "details" ? "typing" : allHolds.length ? "held" : "browse";
+  const nextPendingIdx = apart ? legs.findIndex((l) => !l.hold) : -1;
+  // Si van en horas distintas, el tramo de las otras citas se marca para no solaparlas
+  const otherSpans = apart ? legs.flatMap((l, i) => (i !== activeLeg && l.hold ? [{ start: new Date(l.hold.startsAt).getTime(), end: new Date(l.hold.endsAt).getTime(), name: l.service.name }] : [])) : [];
+  const curDurMs = (availServices[0]?.durationMin ?? 0) * 60000;
+  const nextMonthLabel = fmtMonth(new Date(Date.UTC(yy, mm, 1)).toISOString().slice(0, 7));
   const staffName = hold?.staffName ?? (staffChoice ? staff.find((s) => s.id === staffChoice)?.name : null);
   const stepIndex = stepOrder.indexOf(step);
 
@@ -376,15 +617,21 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         <div className="slots__grid" role="group" aria-label={title}>
           {list.map((s) => {
             const mine = hold?.startsAt === s.startsAt;
-            const taken = !s.available && !mine;
+            const sStart = new Date(s.startsAt).getTime();
+            // coincide con otra cita suya (visita en horas distintas)
+            const clash = mine ? undefined : otherSpans.find((o) => sStart < o.end && o.start < sStart + curDurMs);
+            const taken = !s.available && !mine && !clash;
+            // empieza dentro del tiempo que ocupa su cita: se ve bloqueado como parte de ella, y al pulsarlo la cita se mueve ahí
+            const range = !!hold && !!hold.endsAt && !mine && !clash && !taken && sStart > new Date(hold.startsAt).getTime() && sStart < new Date(hold.endsAt).getTime(); // se compara por instante, no por texto
             return (
               <button
                 key={s.startsAt}
                 type="button"
-                className={`slot ${mine ? "slot--mine" : ""} ${taken ? "slot--taken" : ""}`}
-                disabled={taken || busySlot === s.startsAt}
+                className={`slot ${mine ? "slot--mine" : ""} ${taken ? "slot--taken" : ""} ${clash ? "slot--yours" : ""} ${range ? "slot--range" : ""}`}
+                title={clash ? `Coincide con tu cita de ${clash.name}` : range && hold ? `Parte de tu cita (${fmtHM(hold.startsAt)} a ${fmtHM(hold.endsAt)}). Púlsalo para mover tu cita aquí.` : undefined}
+                disabled={taken || !!clash || busySlot === s.startsAt}
                 aria-pressed={mine}
-                aria-label={taken ? `${s.time}, ocupado` : mine ? `${s.time}, bloqueado para ti` : s.time}
+                aria-label={clash ? `${s.time}, coincide con tu cita de ${clash.name}` : taken ? `${s.time}, ocupado` : mine ? `${s.time}, bloqueado para ti` : range ? `${s.time}, parte de tu cita` : s.time}
                 onClick={() => void pickSlot(s)}
               >
                 {mine && (
@@ -398,6 +645,8 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                   </motion.span>
                 )}
                 {taken && <Lock size={12} aria-hidden="true" className="slot__lock--taken" />}
+                {range && <Lock size={11} aria-hidden="true" className="slot__lock--range" />}
+                {clash && <Clock size={12} aria-hidden="true" className="slot__lock--yours" />}
                 {s.time}
               </button>
             );
@@ -488,7 +737,63 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                 <button type="button" className="back" onClick={back}>
                   <ArrowLeft size={16} aria-hidden="true" /> {multiStaff ? "Cambiar profesional" : "Cambiar servicio"}
                 </button>
-                <h2 className="panel__title">Elige tu hueco</h2>
+                <h2 className="panel__title">{apart && cur ? `Elige la hora de ${cur.service.name}` : "Elige tu hueco"}</h2>
+
+                <div className="visit">
+                  <p className="visit__title">Tu cita: <b>{fmtDuration(totalDuration)}</b> · <b>{fmtPrice(totalPrice)}</b></p>
+                  {visitServices.length > 1 && (
+                    <div className="seg" role="radiogroup" aria-label="Cómo quieres tu visita">
+                      <button type="button" role="radio" aria-checked={!apart} className={`seg__btn ${!apart ? "is-on" : ""}`} onClick={goTogether}>
+                        <strong>Todo seguido</strong><small>Un solo bloque</small>
+                      </button>
+                      <button type="button" role="radio" aria-checked={apart} className={`seg__btn ${apart ? "is-on" : ""}`} onClick={goApart}>
+                        <strong>Cada uno a su hora</strong><small>Días y horas distintos</small>
+                      </button>
+                    </div>
+                  )}
+                  {apart ? (
+                    <ol className="legs">
+                      {legs.map((l, i) => (
+                        <li key={l.service.id} className={`leg ${i === activeLeg ? "is-active" : ""} ${l.hold ? "is-done" : ""}`}>
+                          <button type="button" className="leg__main" onClick={() => selectLeg(i)} aria-current={i === activeLeg ? "step" : undefined}>
+                            <span className="leg__n">{l.hold ? <Check size={14} aria-hidden="true" /> : i + 1}</span>
+                            <span className="leg__txt">
+                              <strong>{l.service.name} <small>{fmtDuration(l.service.durationMin)}</small></strong>
+                              <em>{l.hold ? fmtLong(l.hold.startsAt) : i === activeLeg ? "Elige su hora aquí abajo" : "Toca para elegir su hora"}</em>
+                            </span>
+                          </button>
+                          <button type="button" className="leg__x" onClick={() => removeService(l.service.id)} aria-label={`Quitar ${l.service.name}`}>Quitar</button>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <ul className="visit__list">
+                      {visitServices.map((x) => (
+                        <li key={x.id}>
+                          <span>{x.name} <small>{fmtDuration(x.durationMin)}</small></span>
+                          {visitServices.length > 1 && <button type="button" onClick={() => removeService(x.id)} aria-label={`Quitar ${x.name}`}>Quitar</button>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {visitServices.length < 4 && (
+                    <button type="button" className="visit__add" onClick={() => setAddOpen((o) => !o)} aria-expanded={addOpen}>
+                      {addOpen ? "Cerrar" : "＋ Añadir otro servicio a la misma visita"}
+                    </button>
+                  )}
+                  {addOpen && (
+                    <ul className="visit__pick">
+                      {services.filter((x) => !visitServices.some((v) => v.id === x.id)).map((x) => (
+                        <li key={x.id}>
+                          <button type="button" onClick={() => addExtra(x)}>
+                            <span>{x.name}<small>{fmtDuration(x.durationMin)}</small></span>
+                            <b>{fmtPrice(x.priceCents)}</b>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
 
                 <div className="cal" aria-label="Calendario">
                   <div className="cal__head">
@@ -531,7 +836,14 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                   </div>
                   {slots === null && <p className="muted" aria-live="polite">Cargando huecos…</p>}
                   {slots !== null && Object.keys(dayInfo).length === 0 && (
-                    <p className="muted">No quedan huecos este mes. Prueba con el siguiente.</p>
+                    <div className="empty">
+                      <p className="muted">No quedan huecos en {fmtMonth(month)}.</p>
+                      {canNext && (
+                        <button type="button" className="btn btn--ghost btn--sm" onClick={() => shiftMonth(1)}>
+                          Ver {nextMonthLabel} <ChevronRight size={16} aria-hidden="true" />
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
 
@@ -542,14 +854,17 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                     {renderSlots("Tarde", afternoon)}
                     <p className="legend">
                       <Lock size={12} aria-hidden="true" /> Ocupado o bloqueado por otra persona
+                      {hold && <span className="legend__range"> · Tramo de tu cita: pulsa otra hora para moverla</span>}
+                      {otherSpans.length > 0 && <span className="legend__yours"> · Coincide con tu otra cita</span>}
                     </p>
                   </div>
                 )}
 
-                {!hold && slots !== null && (
+                {!hold && slots !== null && availServices.length > 0 && (
                   <WaitlistForm
-                    key={`${service.id}-${day ?? "any"}`}
-                    serviceId={service.id}
+                    key={`${availKey}-${day ?? "any"}`}
+                    serviceId={availServices[0]?.id ?? service.id}
+                    serviceIds={availServices.map((x) => x.id)}
                     day={day}
                     dayLabel={day ? fmtDayLabel(day) : undefined}
                     source="web"
@@ -558,7 +873,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                 )}
 
                 <AnimatePresence>
-                  {hold && (
+                  {allHolds.length > 0 && (
                     <motion.div
                       className="holdbar"
                       initial={reduce ? { opacity: 0 } : { opacity: 0, transform: "translateY(12px)" }}
@@ -569,17 +884,35 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                       <div className="holdbar__row">
                         <span className="holdbar__icon"><Lock size={18} aria-hidden="true" /></span>
                         <div>
-                          <strong>Hueco bloqueado para ti</strong>
-                          <span>{fmtLong(hold.startsAt)}</span>
+                          {apart ? (
+                            <>
+                              <strong>{allHeld ? "Todas tus horas están guardadas" : `${allHolds.length} de ${legs.length} horas guardadas`}</strong>
+                              {legs.length <= 3 && legs.filter((l) => l.hold).map((l) => <span key={l.service.id}>{l.service.name}: {fmtLong((l.hold as Hold).startsAt)}</span>)}
+                            </>
+                          ) : (
+                            hold && (
+                              <>
+                                <strong>Hueco bloqueado para ti</strong>
+                                <span>{fmtLong(hold.startsAt)}</span>
+                                {hold.endsAt && <span>Ocupa de {fmtHM(hold.startsAt)} a {fmtHM(hold.endsAt)} ({fmtDuration(totalDuration)})</span>}
+                              </>
+                            )
+                          )}
                         </div>
                         <span className="holdbar__time" aria-label={`Quedan ${mmss}`}>{mmss}</span>
                       </div>
                       <div className="holdbar__track" aria-hidden="true">
-                        <i style={{ width: `${(remaining / hold.total) * 100}%` }} />
+                        <i style={{ width: `${(remaining / holdTotalSec) * 100}%` }} />
                       </div>
-                      <button type="button" className="btn btn--primary btn--block" onClick={() => setStep("details")}>
-                        Continuar
-                      </button>
+                      {apart && !allHeld ? (
+                        <button type="button" className="btn btn--primary btn--block" onClick={() => selectLeg(nextPendingIdx)}>
+                          Ahora, la hora de {legs[nextPendingIdx]?.service.name}
+                        </button>
+                      ) : (
+                        <button type="button" className="btn btn--primary btn--block" onClick={() => setStep("details")}>
+                          Continuar
+                        </button>
+                      )}
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -587,13 +920,20 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             )}
 
             {/* ---------------- DATOS ---------------- */}
-            {step === "details" && hold && (
+            {step === "details" && allHeld && (
               <>
                 <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> Cambiar hueco</button>
                 <h2 className="panel__title">Tus datos</h2>
                 <div className="holdmini" role="timer" aria-live="off">
-                  <Clock size={15} aria-hidden="true" /> Tu hueco está guardado: quedan <strong>{mmss}</strong>
+                  <Clock size={15} aria-hidden="true" /> {apart ? "Tus huecos están guardados" : "Tu hueco está guardado"}: quedan <strong>{mmss}</strong>
                 </div>
+                {apart && (
+                  <ul className="legsum" aria-label="Tus citas">
+                    {legs.map((l) => (
+                      <li key={l.service.id}><strong>{l.service.name}</strong><span>{l.hold ? fmtLong(l.hold.startsAt) : ""}</span></li>
+                    ))}
+                  </ul>
+                )}
                 <form onSubmit={submit} className="form" noValidate={false}>
                   <label className="field">
                     <span>Nombre</span>
@@ -617,16 +957,24 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                     <input type="checkbox" required checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} />
                     <span>Acepto que Pro Diva use mis datos para gestionar esta cita y enviarme la confirmación y un recordatorio por WhatsApp, SMS o email.</span>
                   </label>
+                  {needsDeposit && (
+                    <p className="notice notice--info">
+                      Este servicio lleva una <b>señal de {fmtPrice(totalDeposit)}</b>, que se descuenta del total. Si cancelas con al menos {refundHours} h de antelación te la devolvemos; si no, se retiene. La pagas con tarjeta en el siguiente paso.
+                    </p>
+                  )}
                   <button type="submit" className="btn btn--primary btn--lg btn--block" disabled={submitting}>
-                    {submitting ? "Confirmando…" : "Confirmar cita"}
+                    {submitting ? (needsDeposit ? "Abriendo el pago…" : "Confirmando…") : needsDeposit ? `Pagar señal de ${fmtPrice(totalDeposit)} y confirmar` : apart ? `Confirmar las ${legs.length} citas` : "Confirmar cita"}
                   </button>
                 </form>
               </>
             )}
 
             {/* ---------------- LISTO ---------------- */}
-            {step === "done" && done && (
+            {step === "done" && done && doneAll.length > 0 && (
               <div className="done">
+                <button type="button" className="back done__back" onClick={back}>
+                  <ArrowLeft size={18} aria-hidden="true" /> Volver al menú
+                </button>
                 <PetalBurst />
                 <motion.svg
                   className="done__check"
@@ -651,29 +999,36 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                     transition={{ delay: 0.25, duration: 0.5, ease: "easeOut" }}
                   />
                 </motion.svg>
-                <h2 className="panel__title">¡Cita confirmada!</h2>
-                <p className="done__when">{fmtLong(done.startsAt)}</p>
-                <p className="muted">
-                  {done.serviceName}
-                  {multiStaff ? ` con ${done.staffName}` : ""} · {fmtPrice(done.priceCents)}
-                </p>
+                <h2 className="panel__title">{doneAll.length > 1 ? "¡Citas confirmadas!" : "¡Cita confirmada!"}</h2>
+                <ul className="donelist">
+                  {doneAll.map((d) => (
+                    <li key={d.code}>
+                      <p className="done__when">{fmtLong(d.startsAt)}</p>
+                      <p className="muted">
+                        {d.serviceName}
+                        {multiStaff ? ` con ${d.staffName}` : ""} · {fmtPrice(d.priceCents)}
+                      </p>
+                      <p className="done__code">Código <strong>{d.code}</strong></p>
+                    </li>
+                  ))}
+                </ul>
                 <p className="muted">{address}</p>
-                <p className="done__code">Código <strong>{done.code}</strong></p>
                 <div className="done__actions">
-                  <a className="btn btn--primary" href={icsHref(done, address)} download={`cita-prodiva-${done.code}.ics`}>
+                  <a className="btn btn--primary" href={icsHref(doneAll, address)} download={`cita-prodiva-${done.code}.ics`}>
                     <CalendarPlus size={17} aria-hidden="true" /> Añadir al calendario
                   </a>
                   <a
                     className="btn btn--ghost"
-                    href={`https://wa.me/${whatsapp}?text=${encodeURIComponent(`Hola, soy ${form.name}. He reservado ${done.serviceName} el ${fmtLong(done.startsAt)} (código ${done.code}).`)}`}
+                    href={`https://wa.me/${whatsapp}?text=${encodeURIComponent(`Hola, soy ${form.name}. He reservado ${doneAll.map((d) => `${d.serviceName} el ${fmtLong(d.startsAt)} (código ${d.code})`).join("; ")}.`)}`}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
                     <MessageCircle size={17} aria-hidden="true" /> Avisar por WhatsApp
                   </a>
-                  <Link className="btn btn--ghost" href={`/reserva/${done.code}?t=${done.token}`}>Ver o cancelar mi cita</Link>
+                  <Link className="btn btn--ghost" href={`/c/${done.code}?t=${done.token}`}>{doneAll.length > 1 ? "Ver, cambiar o cancelar mis citas" : "Ver, cambiar o cancelar mi cita"}</Link>
                 </div>
-                <Link className="back" href="/"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio</Link>
+                <button type="button" className="btn btn--primary btn--lg btn--block" onClick={reset}>Reservar otra cita</button>
+                <Link className="back" href="/"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio de la web</Link>
                 <p className="muted small">El mismo día te escribiremos para que confirmes con un toque. Guarda el enlace de arriba por si necesitas cancelar.</p>
               </div>
             )}
@@ -681,16 +1036,31 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         </AnimatePresence>
       </div>
 
+      <div className="flow__side">
       {step !== "done" && (
         <aside className="summary" aria-label="Resumen de tu cita">
           <h2>Tu cita</h2>
           <dl>
-            <dt>Servicio</dt>
-            <dd>{service ? service.name : "Sin elegir"}</dd>
+            <dt>{apart ? "Tus citas" : "Servicio"}</dt>
+            <dd>
+              {apart ? (
+                <ul className="summary__legs">
+                  {legs.map((l) => (
+                    <li key={l.service.id}><span>{l.service.name}</span><em>{l.hold ? fmtLong(l.hold.startsAt) : "sin hora"}</em></li>
+                  ))}
+                </ul>
+              ) : visitServices.length ? visitServices.map((x) => x.name).join(" + ") : "Sin elegir"}
+            </dd>
             {service && (
               <>
                 <dt>Duración y precio</dt>
-                <dd>{fmtDuration(service.durationMin)} · {fmtPrice(service.priceCents)}</dd>
+                <dd>{fmtDuration(totalDuration)} · {fmtPrice(totalPrice)}</dd>
+              </>
+            )}
+            {needsDeposit && (
+              <>
+                <dt>Señal</dt>
+                <dd>{fmtPrice(totalDeposit)} (se descuenta del total)</dd>
               </>
             )}
             {multiStaff && (
@@ -699,12 +1069,26 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                 <dd>{staffName ?? (step === "service" || step === "staff" ? "Sin elegir" : "La primera libre")}</dd>
               </>
             )}
-            <dt>Fecha y hora</dt>
-            <dd>{hold ? fmtLong(hold.startsAt) : "Sin elegir"}</dd>
+            {!apart && (
+              <>
+                <dt>Fecha y hora</dt>
+                <dd>{hold ? fmtLong(hold.startsAt) : "Sin elegir"}</dd>
+              </>
+            )}
           </dl>
-          {hold && step !== "details" && <p className="summary__hold"><Lock size={13} aria-hidden="true" /> Bloqueado {mmss}</p>}
+          {allHolds.length > 0 && step !== "details" && <p className="summary__hold"><Lock size={13} aria-hidden="true" /> Bloqueado {mmss}</p>}
         </aside>
       )}
+      <BookingAvatar
+        state={avatarState}
+        trends={trends}
+        services={services}
+        selected={visitServices.map((x) => x.slug)}
+        step={step}
+        address={address}
+        onAdd={addFromAvatar}
+      />
+      </div>
     </div>
   );
 }

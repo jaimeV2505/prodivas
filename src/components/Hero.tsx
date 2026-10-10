@@ -4,10 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useReducedMotion } from "framer-motion";
 import { Check } from "lucide-react";
+import { HERO_PHOTO } from "@/lib/media";
 import type { Polish } from "@/lib/polish";
 import Art from "./Art";
 import BreathingTitle from "./BreathingTitle";
 import HandPolish from "./HandPolish";
+import HeroPhoto from "./HeroPhoto";
 import HeroBooker, { type HeroService } from "./HeroBooker";
 import Petals from "./Petals";
 import RotatingBadge from "./RotatingBadge";
@@ -45,9 +47,11 @@ export default function Hero({ services, today }: { services: HeroService[]; tod
   }, [video]);
 
   return (
-    <section className="hero2" aria-label="Presentación de Pro Diva">
-      <div className="hero2__bg" aria-hidden="true">
-        {video ? (
+    <section className={`hero2 ${HERO_PHOTO ? "hero2--photo" : ""}`} aria-label="Presentación de Pro Diva">
+      <div className="hero2__bg" aria-hidden={HERO_PHOTO ? undefined : true}>
+        {HERO_PHOTO ? (
+          <HeroPhoto color={color} variant="full" />
+        ) : video ? (
           <>
             <video ref={videoRef} className="hero__video" src="/videos/hero.mp4" poster="/videos/hero.jpg" muted loop playsInline preload="auto" />
             <div className="hero__veil" />
@@ -79,7 +83,12 @@ export default function Hero({ services, today }: { services: HeroService[]; tod
           </p>
         </div>
         <div className="hero2__right">
-          <HandPolish value={color} onChange={setColor} />
+          {HERO_PHOTO && (
+            <div className="hero2__banner">
+              <HeroPhoto color={color} variant="banner" />
+            </div>
+          )}
+          <HandPolish value={color} onChange={setColor} showHand={!HERO_PHOTO} />
         </div>
       </div>
 

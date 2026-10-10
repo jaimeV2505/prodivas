@@ -1,9 +1,11 @@
 import { query } from "./db";
 import { getSummaryById } from "./bookings";
 import { notifyOwnerUnconfirmed, notifyReminder } from "./notify";
+import { runDeliveryFallback } from "./fallback";
+import { runDailySummary } from "./summary";
 import { expireWaitlist } from "./waitlist";
 
-export type RunResult = { reminded: number; failed: number; alerted: number };
+export type RunResult = { reminded: number; failed: number; alerted: number; smsFallback: number; summary: boolean };
 
 /**
  * Se ejecuta cada ~10 min desde el cron.
@@ -13,7 +15,7 @@ export type RunResult = { reminded: number; failed: number; alerted: number };
  * y como máximo se intenta 3 veces.
  */
 export async function runReminders(): Promise<RunResult> {
-  const out: RunResult = { reminded: 0, failed: 0, alerted: 0 };
+  const out: RunResult = { reminded: 0, failed: 0, alerted: 0, smsFallback: 0, summary: false };
 
   // 1) Recordatorios: reclamamos las citas (lease de 15 min) y enviamos
   const due = await query<{ id: string }>(
@@ -57,6 +59,17 @@ export async function runReminders(): Promise<RunResult> {
       await notifyOwnerUnconfirmed(b);
       out.alerted++;
     }
+  }
+  // 3) WhatsApp que no llegó → SMS de respaldo
+  const fb = await runDeliveryFallback();
+  out.smsFallback = fb.sms;
+  out.alerted += fb.alerted;
+
+  // 4) Resumen diario para la dueña y limpieza
+  try {
+    out.summary = await runDailySummary();
+  } catch (e) {
+    console.error("[summary]", e);
   }
   await expireWaitlist();
   return out;

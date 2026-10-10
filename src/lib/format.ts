@@ -66,3 +66,8 @@ export function waLink(phone: string, text?: string): string {
   if (digits.length === 9) digits = `34${digits}`;
   return `https://wa.me/${digits}${text ? `?text=${encodeURIComponent(text)}` : ""}`;
 }
+
+/** Hora local del salón, "16:45". */
+export function fmtHM(iso: string): string {
+  return new Intl.DateTimeFormat("es-ES", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TZ }).format(new Date(iso));
+}

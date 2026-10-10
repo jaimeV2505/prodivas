@@ -6,6 +6,8 @@ import { addDays } from "@/lib/dates";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtPrice } from "@/lib/format";
 import type { Service } from "./BookingFlow";
 import { icsHref } from "@/lib/ics";
+import { saveBooking } from "@/lib/myBookings";
+import MyBookings from "./MyBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
 import CallbackForm from "./CallbackForm";
 import PetalBurst from "./PetalBurst";
@@ -40,6 +42,8 @@ export default function EasyBooking({
   mapsUrl,
   initialSlug,
   initialDay,
+  depositEnabled = false,
+  refundHours = 24,
 }: {
   services: Service[];
   today: string;
@@ -47,6 +51,8 @@ export default function EasyBooking({
   mapsUrl: string;
   initialSlug?: string;
   initialDay?: string;
+  depositEnabled?: boolean;
+  refundHours?: number;
 }) {
   // Enlaces de "se ha liberado un hueco": entran directos al servicio (y al día) elegidos
   const initSvc = services.find((x) => x.slug === initialSlug) ?? null;
@@ -63,7 +69,6 @@ export default function EasyBooking({
   const [notice, setNotice] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "" });
   const [done, setDone] = useState<Done | null>(null);
-  const [last, setLast] = useState<Last | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [xl, setXl] = useState(false);
   const holdRef = useRef<Hold | null>(null);
@@ -71,19 +76,6 @@ export default function EasyBooking({
   useEffect(() => {
     holdRef.current = hold;
   }, [hold]);
-
-  // Cita guardada en este móvil: al abrir la app se ve enseguida
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("pd_last");
-      if (raw) {
-        const l = JSON.parse(raw) as Last;
-        if (new Date(l.startsAt).getTime() > Date.now()) setLast(l);
-      }
-    } catch {
-      /* sin almacenamiento: no pasa nada */
-    }
-  }, []);
 
   // Perfil recordado en este móvil: saludo, "repetir mi cita" y datos ya escritos
   useEffect(() => {
@@ -233,12 +225,18 @@ export default function EasyBooking({
         }
         return;
       }
+      if (j.checkoutUrl) {
+        // Pago de la señal en Stripe: el hueco debe seguir bloqueado mientras tanto
+        holdRef.current = null;
+        window.location.assign(j.checkoutUrl as string);
+        return;
+      }
       const b = j.booking as Done;
       setDone(b);
       setHold(null);
       setStep("done");
       try {
-        localStorage.setItem("pd_last", JSON.stringify({ code: b.code, token: b.token, startsAt: b.startsAt, serviceName: b.serviceName }));
+        saveBooking(b.code, b.token);
         localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, slug: service?.slug ?? "", serviceName: b.serviceName }));
       } catch {
         /* nada */
@@ -284,8 +282,6 @@ export default function EasyBooking({
     setDone(null);
     setNotice(null);
     setForm({ name: "", phone: "" });
-    const raw = localStorage.getItem("pd_last");
-    if (raw) setLast(JSON.parse(raw) as Last);
   }
 
   const stepNo = step === "category" || step === "service" ? 1 : step === "day" ? 2 : step === "time" ? 3 : step === "details" ? 4 : 0;
@@ -314,15 +310,8 @@ export default function EasyBooking({
       <div key={step} className="easy__step">
       {step === "home" && (
         <>
-          {last && (
-            <section className="easy__card easy__next">
-              <p className="easy__label">Tu próxima cita</p>
-              <p className="easy__when">{fmtLong(last.startsAt)}</p>
-              <p>{last.serviceName}</p>
-              <a className="easy__btn easy__btn--soft" href={`/c/${last.code}?t=${last.token}`}>Ver, confirmar o cancelar</a>
-            </section>
-          )}
           <h1 className="easy__h">{profile?.name ? `Hola, ${profile.name.split(" ")[0]}` : "¿Quieres pedir cita?"}</h1>
+          <MyBookings variant="easy">
           {profile?.slug && services.some((x) => x.slug === profile.slug) && (
             <button type="button" className="easy__btn easy__btn--main" onClick={repeatLast}>
               Repetir: {profile.serviceName}
@@ -339,6 +328,7 @@ export default function EasyBooking({
             {profile?.slug ? "Pedir otra cosa" : "Pedir cita"}
           </button>
           <CallbackForm initialName={profile?.name ?? ""} initialPhone={profile?.phone ?? ""} />
+          </MyBookings>
         </>
       )}
 
@@ -457,8 +447,13 @@ export default function EasyBooking({
               <span>Tu teléfono (te avisaremos por mensaje)</span>
               <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="600 123 456" />
             </label>
+            {depositEnabled && (service.depositCents ?? 0) > 0 && (
+              <p className="notice notice--info easy__notice">
+                Este servicio lleva una <b>señal de {fmtPrice(service.depositCents ?? 0)}</b> que se descuenta del total. Si cancelas con {refundHours} horas o más te la devolvemos. La pagas con tarjeta en el siguiente paso.
+              </p>
+            )}
             <button type="submit" className="easy__btn easy__btn--main" disabled={busy}>
-              {busy ? "Confirmando…" : "Confirmar mi cita"}
+              {busy ? "Un momento…" : depositEnabled && (service.depositCents ?? 0) > 0 ? `Pagar señal de ${fmtPrice(service.depositCents ?? 0)}` : "Confirmar mi cita"}
             </button>
             <p className="easy__legal">Al confirmar, Pro Diva usará tus datos para gestionar tu cita y enviarte la confirmación y un recordatorio por WhatsApp o SMS.</p>
           </form>
@@ -467,6 +462,9 @@ export default function EasyBooking({
 
       {step === "done" && done && (
         <section className="easy__done">
+          <button type="button" className="easy__back easy__back--left" onClick={back}>
+            <ArrowLeft size={26} aria-hidden="true" /> Volver al menú
+          </button>
           <PetalBurst />
           <span className="easy__tick"><Check size={56} aria-hidden="true" /></span>
           <h1 className="easy__h">¡Cita confirmada!</h1>
@@ -484,7 +482,17 @@ export default function EasyBooking({
             <MapPin size={26} aria-hidden="true" /> Cómo llegar
           </a>
           <p className="muted">{address}</p>
-          <button type="button" className="easy__btn easy__btn--main" onClick={restart}>Terminar</button>
+          <button
+            type="button"
+            className="easy__btn easy__btn--main"
+            onClick={() => {
+              restart();
+              setStep("category");
+            }}
+          >
+            Pedir otra cita
+          </button>
+          <button type="button" className="easy__btn easy__btn--soft" onClick={restart}>Ver mis citas</button>
         </section>
       )}
       </div>

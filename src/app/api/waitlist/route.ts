@@ -10,7 +10,8 @@ import { joinWaitlist } from "@/lib/waitlist";
 export const dynamic = "force-dynamic";
 
 const Body = z.object({
-  serviceId: z.number().int().positive(),
+  serviceId: z.number().int().positive().optional(),
+  serviceIds: z.array(z.number().int().positive()).min(1).max(4).optional(),
   day: z.string().refine(isDay).nullable().optional(),
   part: z.enum(["ANY", "MORNING", "AFTERNOON"]).default("ANY"),
   name: z.string().trim().min(2, "Escribe tu nombre").max(80),
@@ -18,14 +19,14 @@ const Body = z.object({
   email: z.string().trim().email("Revisa tu email").max(120).optional().or(z.literal("")),
   source: z.enum(["web", "app"]).default("web"),
   website: z.string().optional(), // honeypot
-});
+}).refine((b) => b.serviceId || b.serviceIds, "Falta el servicio");
 
 export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
     if (b.website) throw new BookingError("INVALID", "No hemos podido procesar la solicitud.");
     const r = await joinWaitlist({
-      serviceId: b.serviceId,
+      serviceIds: b.serviceIds ?? [b.serviceId!],
       day: b.day ?? null,
       part: b.part,
       name: b.name,

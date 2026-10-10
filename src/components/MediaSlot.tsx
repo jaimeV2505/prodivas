@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
+import { STILLS } from "@/lib/media";
 import Art, { type ArtVariant } from "./Art";
 
 type Props = { name: string; variant: ArtVariant; className?: string };
@@ -16,6 +17,7 @@ export default function MediaSlot({ name, variant, className = "" }: Props) {
   const [exists, setExists] = useState(false);
   const [ready, setReady] = useState(false);
   const src = `/videos/${name}.mp4`;
+  const still = STILLS[name];
 
   useEffect(() => {
     let off = false;
@@ -48,6 +50,7 @@ export default function MediaSlot({ name, variant, className = "" }: Props) {
   return (
     <div className={`media ${className}`}>
       <Art variant={variant} />
+      {still && <img className="media__img" src={still} alt="" loading="lazy" decoding="async" />}
       {exists && (
         <video
           ref={ref}

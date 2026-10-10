@@ -1,16 +1,58 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import AdminNav from "@/components/AdminNav";
+import { logout } from "../actions";
 import { isAdmin } from "@/lib/auth";
 import { getSlotMode, SLOT_MODES, type SlotMode } from "@/lib/availability";
+import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
-import { addServiceAction, saveHoursAction, saveModeAction, saveServiceAction } from "./actions";
+import { enabled } from "@/lib/messaging";
+import { DEPOSIT_REFUND_HOURS, stripeEnabled } from "@/lib/payments";
+import { derivedSecret } from "@/lib/secrets";
+import { siteUrl } from "@/lib/site";
+import {
+  addServiceAction,
+  addStaffAction,
+  addTrendAction,
+  deleteTrendAction,
+  saveTrendAction,
+  clearStaffHoursAction,
+  saveHoursAction,
+  saveModeAction,
+  saveServiceAction,
+  saveStaffAction,
+  saveStaffHoursAction,
+  testChannelAction,
+} from "./actions";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Ajustes", robots: { index: false, follow: false } };
 
-type Svc = { id: number; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; active: boolean; sort: number };
+type Svc = { id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
 type Hours = { weekday: number; closed: boolean; open: string | null; close: string | null; bs: string | null; be: string | null };
+type StaffHours = Hours & { staff_id: number };
+type Staff = { id: number; name: string; active: boolean };
+type TrendRow = { id: number; emoji: string; title: string; body: string; topic: string; service_slug: string | null; active: boolean; sort: number };
+const TOPIC_LABEL: Record<string, string> = { nails: "Uñas", lashes: "Pestañas", brows: "Cejas", wax: "Depilación", general: "General" };
+
+const DAYS_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+function HoursRow({ d, h, hidden, action, extra }: { d: number; h?: Hours; hidden: Record<string, string | number>; action: (fd: FormData) => Promise<void>; extra?: string }) {
+  return (
+    <form action={action} className="svc svc--hours">
+      {Object.entries(hidden).map(([k, v]) => <input key={k} type="hidden" name={k} value={v} />)}
+      <input type="hidden" name="weekday" value={d} />
+      <strong className="svc__day">{WEEKDAYS[d]}</strong>
+      <label className="check"><input type="checkbox" name="closed" defaultChecked={!h || h.closed} /><span>{extra ?? "Cerrado"}</span></label>
+      <label className="field"><span>Abre</span><input type="time" name="open" defaultValue={h?.open ?? "10:00"} /></label>
+      <label className="field"><span>Cierra</span><input type="time" name="close" defaultValue={h?.close ?? "20:00"} /></label>
+      <label className="field"><span>Pausa desde</span><input type="time" name="bs" defaultValue={h?.bs ?? ""} /></label>
+      <label className="field"><span>Pausa hasta</span><input type="time" name="be" defaultValue={h?.be ?? ""} /></label>
+      <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+    </form>
+  );
+}
 
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ ok?: string; err?: string }> }) {
   const sp = await searchParams;
@@ -25,28 +67,94 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     );
   }
 
-  const [services, hoursRows, mode] = await Promise.all([
-    query<Svc>(`SELECT id, name, category, duration_min, price_cents, slot_step_min, active, sort FROM services ORDER BY active DESC, sort, id`),
+  const [services, hoursRows, mode, staff, staffHours, cron, trends] = await Promise.all([
+    query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, active, sort FROM services ORDER BY active DESC, sort, id`),
     query<Hours>(
       `SELECT weekday, closed, to_char(open_time, 'HH24:MI') AS open, to_char(close_time, 'HH24:MI') AS close,
               to_char(break_start, 'HH24:MI') AS bs, to_char(break_end, 'HH24:MI') AS be FROM business_hours`,
     ),
     getSlotMode(),
+    query<Staff>(`SELECT id, name, active FROM staff ORDER BY active DESC, sort, id`),
+    query<StaffHours>(
+      `SELECT staff_id, weekday, closed, to_char(open_time, 'HH24:MI') AS open, to_char(close_time, 'HH24:MI') AS close,
+              to_char(break_start, 'HH24:MI') AS bs, to_char(break_end, 'HH24:MI') AS be FROM staff_hours`,
+    ),
+    query<{ mins: number | null }>(`SELECT (EXTRACT(EPOCH FROM (now() - value::timestamptz)) / 60)::int AS mins FROM settings WHERE key = 'last_cron_run'`),
+    query<TrendRow>(`SELECT id, emoji, title, body, topic, service_slug, active, sort FROM trends ORDER BY active DESC, sort, id`).catch(() => [] as TrendRow[]),
   ]);
   const byDay = new Map(hoursRows.map((h) => [h.weekday, h]));
   const eur = (c: number) => (c / 100).toString().replace(".", ",");
+  const cronMins = cron[0]?.mins ?? null;
+  const depositWithoutStripe = !stripeEnabled() && services.some((s) => s.active && s.deposit_cents > 0);
+
+  const checks: { label: string; ok: boolean; hint: string; test?: string }[] = [
+    { label: "Aviso instantáneo a la dueña (Telegram)", ok: enabled.telegram(), hint: "TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID", test: "telegram" },
+    { label: "Email (Resend)", ok: enabled.email() && !!process.env.OWNER_EMAIL, hint: "RESEND_API_KEY, MAIL_FROM y OWNER_EMAIL", test: "email" },
+    { label: "SMS a las clientas (Twilio)", ok: enabled.sms(), hint: "TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN y TWILIO_FROM", test: "sms" },
+    { label: "WhatsApp Business (Meta)", ok: enabled.whatsapp(), hint: "WHATSAPP_TOKEN y WHATSAPP_PHONE_NUMBER_ID", test: "whatsapp" },
+    { label: "Botones Confirmar / Cancelar dentro de WhatsApp", ok: !!process.env.WHATSAPP_APP_SECRET && !!process.env.WHATSAPP_VERIFY_TOKEN, hint: "WHATSAPP_APP_SECRET y WHATSAPP_VERIFY_TOKEN (+ webhook en Meta)" },
+    { label: "Recordatorios automáticos", ok: !!process.env.CRON_SECRET, hint: "CRON_SECRET en Vercel y en los secretos de GitHub" },
+    { label: "Señal con tarjeta (Stripe)", ok: stripeEnabled(), hint: "STRIPE_SECRET_KEY y STRIPE_WEBHOOK_SECRET" },
+    { label: "Dirección pública de la web", ok: !!process.env.NEXT_PUBLIC_SITE_URL || !!process.env.VERCEL_PROJECT_PRODUCTION_URL, hint: "NEXT_PUBLIC_SITE_URL" },
+  ];
+  const calendarUrl = `${siteUrl()}/api/calendar/${derivedSecret("calendar-feed")}.ics`;
 
   return (
     <main className="container admin">
-      <header className="admin__bar">
-        <h1>Ajustes</h1>
-        <Link className="btn btn--ghost btn--sm" href="/admin">← Volver a la agenda</Link>
-      </header>
+      <AdminNav active="ajustes" />
       {sp.ok && <p className="notice notice--info" role="status">{sp.ok}</p>}
       {sp.err && <p className="notice notice--error" role="alert">{sp.err}</p>}
-      <p className="muted">
-        Los cambios afectan a los huecos que se ofrecen a partir de ahora. Las citas ya reservadas conservan su hora y su duración.
-      </p>
+      <p className="muted">Los cambios afectan a los huecos que se ofrecen a partir de ahora. Las citas ya reservadas conservan su hora, su duración y su precio.</p>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Estado de la configuración</h2>
+        <ul className="checks">
+          {checks.map((c) => (
+            <li key={c.label} className={c.ok ? "is-ok" : "is-missing"}>
+              <span aria-hidden="true">{c.ok ? "✓" : "✗"}</span>
+              <span><b>{c.label}</b>{!c.ok && <small>Falta: {c.hint}</small>}</span>
+            </li>
+          ))}
+          <li className={cronMins !== null && cronMins <= 30 ? "is-ok" : "is-missing"}>
+            <span aria-hidden="true">{cronMins !== null && cronMins <= 30 ? "✓" : "✗"}</span>
+            <span>
+              <b>Último ciclo de recordatorios</b>
+              <small>{cronMins === null ? "Todavía no se ha ejecutado nunca: revisa el workflow de GitHub." : cronMins <= 30 ? `Hace ${cronMins} min` : `Hace ${cronMins} min: debería ejecutarse cada 10. Revisa GitHub Actions.`}</small>
+            </span>
+          </li>
+        </ul>
+        <h3 className="svc__new">Enviar un mensaje de prueba</h3>
+        <form action={testChannelAction} className="form form--grid">
+          <label className="field field--wide"><span>Teléfono para SMS y WhatsApp (con prefijo)</span>
+            <input name="phone" type="tel" defaultValue={process.env.NOTIFY_TEST_PHONE ?? ""} placeholder="+34600123456" />
+          </label>
+          {checks.filter((c) => c.test).map((c) => (
+            <button key={c.test} className="btn btn--ghost btn--sm" type="submit" name="channel" value={c.test}>Probar {c.test === "telegram" ? "Telegram" : c.test === "email" ? "email" : c.test === "sms" ? "SMS" : "WhatsApp"}</button>
+          ))}
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Calendario en tu móvil</h2>
+        <p className="muted small">Suscríbete una vez y las citas aparecen solas en tu calendario (Apple, Google u Outlook). Es una dirección secreta: no la compartas.</p>
+        <div className="copybox">
+          <a href={calendarUrl.replace(/^https?:/, "webcal:")}>Suscribirme (iPhone y Mac)</a>
+          <code>{calendarUrl}</code>
+        </div>
+        <p className="muted small">En Google Calendar: Otros calendarios → Desde URL → pega la dirección de arriba (Google tarda unas horas en refrescar).</p>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Políticas actuales</h2>
+        <ul className="muted">
+          <li>Recordatorio con Confirmar / Cancelar: {process.env.REMINDER_HOURS_BEFORE ?? 4} h antes.</li>
+          <li>Cancelar online: hasta {CONFIG.cancelNoticeHours} h antes (desde el recordatorio, siempre).</li>
+          <li>Cambiar la hora online: hasta {process.env.RESCHEDULE_NOTICE_HOURS ?? 12} h antes.</li>
+          <li>Señal: se devuelve si cancela con {DEPOSIT_REFUND_HOURS} h o más; si no, se retiene. Si el centro cancela, siempre se devuelve.</li>
+          <li>Aviso de plantones: a partir de {process.env.NO_SHOW_ALERT ?? 2}.</li>
+        </ul>
+        <p className="muted small">Se cambian con variables de entorno (README).</p>
+      </section>
 
       <section className="panel">
         <h2 className="panel__title panel__title--sm">Cómo se ofrecen los huecos</h2>
@@ -64,8 +172,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <section className="panel">
         <h2 className="panel__title panel__title--sm">Servicios</h2>
         <p className="muted small">
-          El hueco de cada servicio es su duración (30 min de servicio = huecos de 30 min). Rellena "Hueco" solo si quieres otro ritmo. Para quitar un servicio, desmarca "Activo": no se borra.
+          El hueco de cada servicio es su duración. «Limpieza» son los minutos que quedan bloqueados después (la clienta no los ve). «Señal» se cobra con tarjeta al reservar y se descuenta del total. Para quitar un servicio, desmarca «Activo»: no se borra.
         </p>
+        {depositWithoutStripe && <p className="notice notice--error" role="alert">Hay servicios con señal, pero Stripe no está configurado: de momento se reservan sin cobrar señal.</p>}
         <div className="svc-list">
           {services.map((s) => (
             <form key={s.id} action={saveServiceAction} className={`svc ${s.active ? "" : "svc--off"}`}>
@@ -73,7 +182,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <label className="field"><span>Servicio</span><input name="name" defaultValue={s.name} required maxLength={80} /></label>
               <label className="field"><span>Categoría</span><input name="category" defaultValue={s.category} required maxLength={60} /></label>
               <label className="field"><span>Duración (min)</span><input name="duration" type="number" min={5} max={480} step={5} defaultValue={s.duration_min} required /></label>
+              <label className="field"><span>Limpieza (min)</span><input name="buffer" type="number" min={0} max={120} step={5} defaultValue={s.buffer_min} /></label>
               <label className="field"><span>Precio (€)</span><input name="price" inputMode="decimal" defaultValue={eur(s.price_cents)} required /></label>
+              <label className="field"><span>Señal (€)</span><input name="deposit" inputMode="decimal" defaultValue={eur(s.deposit_cents)} /></label>
               <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} defaultValue={s.slot_step_min ?? ""} placeholder={String(s.duration_min)} /></label>
               <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={s.sort} /></label>
               <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={s.active} /><span>Activo</span></label>
@@ -87,7 +198,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field"><span>Categoría</span><input name="category" required maxLength={60} list="cats" /></label>
           <datalist id="cats">{Array.from(new Set(services.map((s) => s.category))).map((c) => <option key={c} value={c} />)}</datalist>
           <label className="field"><span>Duración (min)</span><input name="duration" type="number" min={5} max={480} step={5} defaultValue={30} required /></label>
+          <label className="field"><span>Limpieza (min)</span><input name="buffer" type="number" min={0} max={120} step={5} defaultValue={0} /></label>
           <label className="field"><span>Precio (€)</span><input name="price" inputMode="decimal" defaultValue="0" required /></label>
+          <label className="field"><span>Señal (€)</span><input name="deposit" inputMode="decimal" defaultValue="0" /></label>
           <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} placeholder="= duración" /></label>
           <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={500} /></label>
           <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
@@ -95,26 +208,104 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       </section>
 
       <section className="panel">
-        <h2 className="panel__title panel__title--sm">Horario</h2>
+        <h2 className="panel__title panel__title--sm">Horario del salón</h2>
         <p className="muted small">Pausa opcional (p. ej. 14:00 a 16:00): los huecos se calculan por separado antes y después de la pausa.</p>
         <div className="svc-list">
-          {[1, 2, 3, 4, 5, 6, 0].map((d) => {
-            const h = byDay.get(d);
+          {DAYS_ORDER.map((d) => <HoursRow key={d} d={d} h={byDay.get(d)} hidden={{}} action={saveHoursAction} />)}
+        </div>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Profesionales</h2>
+        <p className="muted small">Con más de una profesional, la clienta puede elegir con quién (o «la primera libre»). Cada una puede tener su propio horario; para sus vacaciones usa «Bloquear horario» en Hoy.</p>
+        <div className="svc-list">
+          {staff.map((p) => {
+            const own = staffHours.filter((h) => h.staff_id === p.id);
+            const ownMap = new Map(own.map((h) => [h.weekday, h]));
             return (
-              <form key={d} action={saveHoursAction} className="svc svc--hours">
-                <input type="hidden" name="weekday" value={d} />
-                <strong className="svc__day">{WEEKDAYS[d]}</strong>
-                <label className="check"><input type="checkbox" name="closed" defaultChecked={!h || h.closed} /><span>Cerrado</span></label>
-                <label className="field"><span>Abre</span><input type="time" name="open" defaultValue={h?.open ?? "10:00"} /></label>
-                <label className="field"><span>Cierra</span><input type="time" name="close" defaultValue={h?.close ?? "20:00"} /></label>
-                <label className="field"><span>Pausa desde</span><input type="time" name="bs" defaultValue={h?.bs ?? ""} /></label>
-                <label className="field"><span>Pausa hasta</span><input type="time" name="be" defaultValue={h?.be ?? ""} /></label>
-                <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
-              </form>
+              <div key={p.id} className={`staffbox ${p.active ? "" : "svc--off"}`}>
+                <form action={saveStaffAction} className="svc">
+                  <input type="hidden" name="id" value={p.id} />
+                  <label className="field"><span>Nombre</span><input name="name" defaultValue={p.name} required maxLength={60} /></label>
+                  <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={p.active} /><span>Activa</span></label>
+                  <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+                </form>
+                <details>
+                  <summary>{own.length ? `Horario propio de ${p.name} (${own.length} días definidos)` : `Usa el horario del salón. Pulsa para darle uno propio`}</summary>
+                  <div className="svc-list">
+                    {DAYS_ORDER.map((d) => (
+                      <HoursRow key={d} d={d} h={ownMap.get(d) ?? byDay.get(d)} hidden={{ staffId: p.id }} action={saveStaffHoursAction} extra="No trabaja" />
+                    ))}
+                  </div>
+                  {own.length > 0 && (
+                    <form action={clearStaffHoursAction}>
+                      <input type="hidden" name="staffId" value={p.id} />
+                      <button className="btn btn--ghost btn--sm" type="submit">Volver al horario del salón</button>
+                    </form>
+                  )}
+                </details>
+              </div>
             );
           })}
         </div>
+        <h3 className="svc__new">Añadir profesional</h3>
+        <form action={addStaffAction} className="svc">
+          <label className="field"><span>Nombre</span><input name="name" required maxLength={60} /></label>
+          <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
+        </form>
       </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Tendencias del avatar</h2>
+        <p className="muted small">
+          La chica de la reserva cuenta estas tendencias (sola, cada cierto rato, o cuando la clienta le pregunta «¿qué se lleva?»). Si eliges un servicio, le ofrece añadirlo a su cita con un toque.
+          Están puestas como orientación para el otoño 2026: <b>cámbialas cuando cambie la temporada</b> y deja solo lo que de verdad hacéis.
+        </p>
+        <div className="svc-list">
+          {trends.map((t) => (
+            <form key={t.id} action={saveTrendAction} className={`svc svc--trend ${t.active ? "" : "svc--off"}`}>
+              <input type="hidden" name="id" value={t.id} />
+              <label className="field field--emoji"><span>Emoji</span><input name="emoji" defaultValue={t.emoji} required maxLength={8} /></label>
+              <label className="field"><span>Título</span><input name="title" defaultValue={t.title} required maxLength={60} /></label>
+              <label className="field field--wide"><span>Lo que cuenta</span><textarea name="body" defaultValue={t.body} required maxLength={280} rows={2} /></label>
+              <label className="field"><span>Tema</span>
+                <select name="topic" defaultValue={t.topic}>{Object.entries(TOPIC_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+              </label>
+              <label className="field"><span>Servicio que ofrece</span>
+                <select name="service_slug" defaultValue={t.service_slug ?? ""}>
+                  <option value="">Ninguno</option>
+                  {services.filter((s) => s.active).map((s) => <option key={s.id} value={s.slug}>{s.name}</option>)}
+                </select>
+              </label>
+              <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" defaultValue={t.sort} min={0} max={9999} /></label>
+              <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={t.active} /><span>Activa</span></label>
+              <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+              <button className="btn btn--ghost btn--sm" type="submit" formAction={deleteTrendAction}>Borrar</button>
+            </form>
+          ))}
+        </div>
+        <h3 className="svc__new">Añadir tendencia</h3>
+        <form action={addTrendAction} className="svc svc--trend">
+          <label className="field field--emoji"><span>Emoji</span><input name="emoji" defaultValue="✨" required maxLength={8} /></label>
+          <label className="field"><span>Título</span><input name="title" required maxLength={60} placeholder="Verde oliva" /></label>
+          <label className="field field--wide"><span>Lo que cuenta</span><textarea name="body" required maxLength={280} rows={2} placeholder="Una o dos frases, en tono cercano." /></label>
+          <label className="field"><span>Tema</span>
+            <select name="topic" defaultValue="nails">{Object.entries(TOPIC_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+          </label>
+          <label className="field"><span>Servicio que ofrece</span>
+            <select name="service_slug" defaultValue="">
+              <option value="">Ninguno</option>
+              {services.filter((s) => s.active).map((s) => <option key={s.id} value={s.slug}>{s.name}</option>)}
+            </select>
+          </label>
+          <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" defaultValue={100} min={0} max={9999} /></label>
+          <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
+        </form>
+      </section>
+
+      <form action={logout} className="admin__logout-bottom">
+        <button className="btn btn--ghost" type="submit">Cerrar sesión</button>
+      </form>
     </main>
   );
 }

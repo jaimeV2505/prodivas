@@ -2,6 +2,8 @@ import { after, type NextRequest } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 import { BookingError, respondToBooking } from "@/lib/bookings";
+import { query } from "@/lib/db";
+import { fallbackByProviderId } from "@/lib/fallback";
 import { enabled, logSend, sendWhatsAppText } from "@/lib/messaging";
 import { notifyOwnerResponse, whenWords } from "@/lib/notify";
 import { offerFreedSlot } from "@/lib/waitlist";
@@ -25,6 +27,7 @@ function validSignature(raw: string, header: string | null): boolean {
   return given.length === expected.length && timingSafeEqual(Buffer.from(given), Buffer.from(expected));
 }
 
+type WaStatus = { id: string; status: string; errors?: { title?: string; code?: number }[] };
 type Msg = {
   from: string;
   type: string;
@@ -39,15 +42,27 @@ export async function POST(req: NextRequest) {
     return new NextResponse("invalid signature", { status: 401 });
   }
 
-  let payload: { entry?: { changes?: { value?: { messages?: Msg[] } }[] }[] };
+  let payload: { entry?: { changes?: { value?: { messages?: Msg[]; statuses?: WaStatus[] } }[] }[] };
   try {
     payload = JSON.parse(raw);
   } catch {
     return NextResponse.json({ ok: true });
   }
 
-  const messages = (payload.entry ?? []).flatMap((e) => (e.changes ?? []).flatMap((c) => c.value?.messages ?? []));
+  const values = (payload.entry ?? []).flatMap((e) => (e.changes ?? []).map((c) => (c.value ?? {}) as { messages?: Msg[]; statuses?: WaStatus[] }));
+  const messages = values.flatMap((v) => v.messages ?? []);
+  const statuses = values.flatMap((v) => v.statuses ?? []);
   after(async () => {
+    // Estados de entrega: sent → delivered → read, o failed (→ SMS de respaldo al momento)
+    for (const st of statuses) {
+      const why = st.errors?.[0]?.title ?? "error de WhatsApp";
+      await query(
+        `UPDATE notification_log SET delivery_status = $2, delivery_updated_at = now(), detail = COALESCE($3, detail)
+         WHERE provider_id = $1 AND NOT (delivery_status IN ('delivered','read') AND $2 = 'sent')`,
+        [st.id, st.status, st.status === "failed" ? why : null],
+      );
+      if (st.status === "failed") await fallbackByProviderId(st.id, why);
+    }
     for (const m of messages) {
       const id = m.button?.payload ?? m.interactive?.button_reply?.id ?? "";
       const match = /^([CX]):([A-Z0-9]{4,16})$/.exec(id);
