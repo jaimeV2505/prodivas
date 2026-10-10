@@ -2,7 +2,7 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { CONFIG } from "@/lib/config";
 import { addDays, isDay, todayIn } from "@/lib/dates";
-import { groupSlots, getSlotRows } from "@/lib/availability";
+import { getCapacity, getSlotRows, groupSlots } from "@/lib/availability";
 import { BookingError } from "@/lib/bookings";
 import { query } from "@/lib/db";
 import { respond } from "@/lib/http";
@@ -20,7 +20,10 @@ export async function GET(req: NextRequest) {
   return respond(async () => {
     const p = Params.parse(Object.fromEntries(req.nextUrl.searchParams));
     const svc = (
-      await query<{ duration_min: number }>(`SELECT duration_min FROM services WHERE id = $1 AND active`, [p.serviceId])
+      await query<{ duration_min: number; step_min: number }>(
+        `SELECT duration_min, COALESCE(slot_step_min, duration_min) AS step_min FROM services WHERE id = $1 AND active`,
+        [p.serviceId],
+      )
     )[0];
     if (!svc) throw new BookingError("NOT_FOUND", "Servicio no encontrado.", 404);
 
@@ -28,9 +31,12 @@ export async function GET(req: NextRequest) {
     const maxDay = addDays(today, CONFIG.maxDaysAhead);
     const from = p.from < today ? today : p.from;
     const to = p.to > maxDay ? maxDay : p.to;
-    if (from > to) return { slots: [] };
+    if (from > to) return { slots: [], capacity: 0 };
 
-    const rows = await getSlotRows({ from, to, durationMin: svc.duration_min, staffId: p.staffId ?? null });
-    return { slots: groupSlots(rows) };
+    const [rows, capacity] = await Promise.all([
+      getSlotRows({ from, to, durationMin: svc.duration_min, stepMin: svc.step_min, staffId: p.staffId ?? null }),
+      getCapacity({ from, to, durationMin: svc.duration_min, staffId: p.staffId ?? null }),
+    ]);
+    return { slots: groupSlots(rows), capacity };
   });
 }

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
 import { daysInMonth } from "@/lib/dates";
+import { useStepHistory } from "@/lib/useStepHistory";
 import PetalBurst from "./PetalBurst";
 import WaitlistForm from "./WaitlistForm";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
@@ -45,6 +46,8 @@ type Props = {
   staff: Staff[];
   initialSlug?: string;
   initialDay?: string;
+  initialTime?: string;
+  initialColor?: string;
   today: string;
   maxDate: string;
   whatsapp: string;
@@ -73,7 +76,7 @@ function icsHref(d: Done, address: string): string {
   return "data:text/calendar;charset=utf-8," + encodeURIComponent(lines.join("\r\n"));
 }
 
-export default function BookingFlow({ services, staff, initialSlug, initialDay, today, maxDate, whatsapp, address }: Props) {
+export default function BookingFlow({ services, staff, initialSlug, initialDay, initialTime, initialColor, today, maxDate, whatsapp, address }: Props) {
   const reduce = useReducedMotion();
   const multiStaff = staff.length > 1;
   const stepOrder: Step[] = multiStaff ? ["service", "staff", "time", "details"] : ["service", "time", "details"];
@@ -87,7 +90,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const initialService = services.find((s) => s.slug === initialSlug) ?? null;
   const [service, setService] = useState<Service | null>(initialService);
   const [staffChoice, setStaffChoice] = useState<number | null>(null); // null = cualquiera
-  const [step, setStep] = useState<Step>(initialService ? (multiStaff ? "staff" : "time") : "service");
+  const [step, setStep] = useState<Step>(initialService ? (multiStaff && !initialTime ? "staff" : "time") : "service");
   const [month, setMonth] = useState((initialDay && initialDay >= today ? initialDay : today).slice(0, 7));
   const [slots, setSlots] = useState<Slot[] | null>(null);
   const [day, setDay] = useState<string | null>(initialDay && initialDay >= today ? initialDay : null);
@@ -95,7 +98,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const [busySlot, setBusySlot] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "error" | "info"; text: string } | null>(null);
   const [now, setNow] = useState(0);
-  const [form, setForm] = useState({ name: "", phone: "", email: "", notes: "", consent: false, website: "" });
+  const [form, setForm] = useState({ name: "", phone: "", email: "", notes: initialColor ? `Color: ${initialColor}` : "", consent: false, website: "" });
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<Done | null>(null);
 
@@ -129,6 +132,17 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [step, service, refresh]);
+
+  // Llegada desde un hueco del hero ("Hoy 17:15"): se bloquea solo y se pasa directo a los datos
+  const autoPicked = useRef(false);
+  useEffect(() => {
+    if (autoPicked.current || !initialTime || !initialDay || !slots || !service || step !== "time") return;
+    autoPicked.current = true;
+    const target = slots.find((x) => x.day === initialDay && x.time === initialTime);
+    if (target?.available) void pickSlot(target, true);
+    else setNotice({ tone: "info", text: "Ese hueco ya no está libre. Elige otro de la lista." });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slots, service, step]);
 
   const dayInfo = useMemo(() => {
     const m: Record<string, { free: number; total: number }> = {};
@@ -199,7 +213,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const remaining = hold ? Math.max(0, Math.ceil((hold.deadline - now) / 1000)) : 0;
   const mmss = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
 
-  async function pickSlot(slot: Slot) {
+  async function pickSlot(slot: Slot, advance = false) {
     if (!service || busySlot) return;
     if (hold?.startsAt === slot.startsAt) return;
     setNotice(null);
@@ -228,6 +242,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
           deadline: Date.now() + j.expiresInSec * 1000,
           total: j.expiresInSec,
         });
+        if (advance) setStep("details");
         await refresh();
       }
     } catch {
@@ -254,17 +269,25 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setNotice(null);
     setStep("time");
   }
-  function back() {
+  // Paso anterior; devuelve true si ha cambiado de paso. El botón "Atrás" del móvil usa la misma lógica.
+  function stepBack(): boolean {
+    if (step === "done") {
+      window.location.assign("/");
+      return false;
+    }
     const i = stepOrder.indexOf(step);
-    if (i <= 0) return;
+    if (i <= 0) return false;
     if (step === "details") {
       setStep("time");
-      return;
+      return true;
     }
     dropHold();
     setNotice(null);
     setStep(stepOrder[i - 1]);
+    return true;
   }
+  const back = useStepHistory(step, stepBack);
+
   function shiftMonth(delta: number) {
     const [y, m] = month.split("-").map(Number);
     setMonth(new Date(Date.UTC(y, m - 1 + delta, 1)).toISOString().slice(0, 7));
@@ -409,6 +432,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {/* ---------------- SERVICIO ---------------- */}
             {step === "service" && (
               <>
+                <Link href="/" className="back"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio</Link>
                 <h2 className="panel__title">¿Qué te hacemos?</h2>
                 {groups.map((g) => (
                   <div key={g.category} className="pick-group">
@@ -649,6 +673,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                   </a>
                   <Link className="btn btn--ghost" href={`/reserva/${done.code}?t=${done.token}`}>Ver o cancelar mi cita</Link>
                 </div>
+                <Link className="back" href="/"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio</Link>
                 <p className="muted small">El mismo día te escribiremos para que confirmes con un toque. Guarda el enlace de arriba por si necesitas cancelar.</p>
               </div>
             )}

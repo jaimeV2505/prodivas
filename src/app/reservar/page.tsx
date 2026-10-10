@@ -11,7 +11,7 @@ export const metadata: Metadata = { title: "Reservar cita" };
 export default async function ReservarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ servicio?: string; dia?: string }>;
+  searchParams: Promise<{ servicio?: string; dia?: string; hora?: string; color?: string }>;
 }) {
   const sp = await searchParams;
   const [services, staff] = await Promise.all([
@@ -33,6 +33,8 @@ export default async function ReservarPage({
           staff={staff}
           initialSlug={sp.servicio}
           initialDay={sp.dia && isDay(sp.dia) ? sp.dia : undefined}
+          initialTime={sp.hora && /^\d{2}:\d{2}$/.test(sp.hora) ? sp.hora : undefined}
+          initialColor={sp.color ? sp.color.replace(/[^\p{L}\p{N} ]/gu, "").slice(0, 40) || undefined : undefined}
           today={today}
           maxDate={addDays(today, CONFIG.maxDaysAhead)}
           whatsapp={CONFIG.salon.whatsapp}

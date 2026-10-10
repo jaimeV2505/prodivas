@@ -226,3 +226,7 @@ export async function notifyOwnerWaitlistOffered(b: BookingSummary, count: numbe
     `Avisadas ${count} de la lista de espera`,
   );
 }
+
+export async function notifyOwnerCallback(c: { name: string; phone: string }): Promise<void> {
+  await toOwner(null, "owner_callback", `📞 <b>Quiere que la llames</b>: ${esc(c.name)}, ${esc(c.phone)}`, `Llámala: ${c.name}`);
+}

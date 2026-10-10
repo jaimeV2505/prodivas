@@ -20,8 +20,6 @@ services:
   web:
     build:
       context: .
-      args:
-        NEXT_PUBLIC_HERO_FRAMES: ${NEXT_PUBLIC_HERO_FRAMES:-90}
     restart: unless-stopped
     depends_on:
       db:
@@ -33,7 +31,6 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-cambiame}
       SESSION_SECRET: ${SESSION_SECRET:-local-dev-secret-change-me-0123456789abcdef}
       SALON_TIMEZONE: ${SALON_TIMEZONE:-Europe/Madrid}
-      SLOT_STEP_MIN: ${SLOT_STEP_MIN:-15}
       MIN_NOTICE_MIN: ${MIN_NOTICE_MIN:-120}
       MAX_DAYS_AHEAD: ${MAX_DAYS_AHEAD:-60}
       HOLD_MINUTES: ${HOLD_MINUTES:-10}

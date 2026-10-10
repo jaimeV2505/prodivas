@@ -5,13 +5,12 @@ import MobileCta from "@/components/MobileCta";
 import Marquee from "@/components/Marquee";
 import ReelWall from "@/components/ReelWall";
 import RevealText from "@/components/RevealText";
-import ScrollHero from "@/components/ScrollHero";
+import Hero from "@/components/Hero";
 import ServiceReel, { type ReelGroup } from "@/components/ServiceReel";
 import SiteHeader from "@/components/SiteHeader";
 import TransitionLink from "@/components/TransitionLink";
-import { getSlotRows, groupSlots } from "@/lib/availability";
 import { CONFIG } from "@/lib/config";
-import { addDays, todayIn } from "@/lib/dates";
+import { todayIn } from "@/lib/dates";
 import { siteUrl } from "@/lib/site";
 import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
@@ -78,26 +77,17 @@ export default async function Home() {
     ),
   ]);
 
-  // Próximos huecos libres (servicio más corto): empuja a reservar y ayuda a llenar el día
+  // Servicios destacados del mini-asistente del hero: los dos primeros de cada categoría (máx. 6)
   const today = todayIn(CONFIG.tz);
-  const shortest = services.reduce<ServiceRow | null>((m, x) => (!m || x.durationMin < m.durationMin ? x : m), null);
-  let nextSlots: { label: string; href: string }[] = [];
-  if (shortest) {
-    try {
-      const rows = await getSlotRows({ from: today, to: addDays(today, 4), durationMin: shortest.durationMin });
-      const wd = new Intl.DateTimeFormat("es-ES", { weekday: "short", timeZone: "UTC" });
-      nextSlots = groupSlots(rows)
-        .filter((x) => x.available)
-        .slice(0, 5)
-        .map((x) => {
-          const [y, m, d] = x.day.split("-").map(Number);
-          const label = x.day === today ? "Hoy" : x.day === addDays(today, 1) ? "Mañana" : wd.format(new Date(Date.UTC(y, m - 1, d)));
-          return { label: `${label} ${x.time}`, href: `/reservar?servicio=${shortest.slug}&dia=${x.day}` };
-        });
-    } catch {
-      nextSlots = [];
-    }
-  }
+  const perCat = new Map<string, number>();
+  const featured = services
+    .filter((x) => {
+      const n = perCat.get(x.category) ?? 0;
+      perCat.set(x.category, n + 1);
+      return n < 2;
+    })
+    .slice(0, 6)
+    .map((x) => ({ id: x.id, slug: x.slug, name: x.name, durationMin: x.durationMin, priceCents: x.priceCents }));
 
   const groups: ReelGroup[] = [];
   for (const s of services) {
@@ -150,7 +140,7 @@ export default async function Home() {
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }} />
       <SiteHeader />
       <main>
-        <ScrollHero nextSlots={nextSlots} />
+        <Hero services={featured} today={today} />
         <Marquee items={marqueeItems} />
 
         <section id="servicios" className="section section--tight">

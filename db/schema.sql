@@ -117,3 +117,28 @@ CREATE TABLE IF NOT EXISTS waitlist (
 CREATE UNIQUE INDEX IF NOT EXISTS waitlist_unique_active
   ON waitlist (service_id, COALESCE(day, DATE '1970-01-01'), phone_key) WHERE status = 'ACTIVE';
 CREATE INDEX IF NOT EXISTS waitlist_match_idx ON waitlist (status, day);
+
+-- ---------------------------------------------------------------------
+-- Huecos por servicio y "llámame"
+-- ---------------------------------------------------------------------
+-- Tamaño del hueco de cada servicio. NULL = igual que su duración (30 min de servicio = huecos de 30 min).
+ALTER TABLE services ADD COLUMN IF NOT EXISTS slot_step_min int
+  CHECK (slot_step_min IS NULL OR slot_step_min BETWEEN 5 AND 480);
+
+CREATE TABLE IF NOT EXISTS callbacks (
+  id         bigserial PRIMARY KEY,
+  name       text NOT NULL,
+  phone      text NOT NULL,
+  ip_hash    text,
+  status     text NOT NULL DEFAULT 'NEW' CHECK (status IN ('NEW','DONE')),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS callbacks_status_idx ON callbacks (status, created_at);
+
+-- ---------------------------------------------------------------------
+-- Ajustes editables desde /admin/ajustes
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS settings (
+  key   text PRIMARY KEY,
+  value text NOT NULL
+);

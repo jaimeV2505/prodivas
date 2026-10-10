@@ -42,6 +42,41 @@ npm run db:migrate && npm run dev
    y opcionalmente `OWNER_EMAIL`, `RESEND_API_KEY`, `MAIL_FROM`, `NEXT_PUBLIC_SITE_URL` (tu dominio, para los enlaces de los emails).
 4. Deploy. El script `vercel-build` ejecuta `scripts/migrate.mjs` antes de compilar: crea el esquema (idempotente) y carga los datos de ejemplo solo si la tabla de servicios está vacía.
 
+## Cómo se calculan los huecos
+
+Todo sale de **tres datos que se editan en `/admin/ajustes`**: la duración de cada servicio, el horario (con pausa) y el modo de huecos. Cambiar cualquiera de ellos reajusta los huecos al instante; las citas ya reservadas conservan su hora y su duración.
+
+1. **Tramos libres.** Para cada profesional y bloque de trabajo (antes y después de la pausa) se restan las citas confirmadas, los bloqueos en curso y el tiempo libre del salón.
+2. **La cita ocupa exactamente la duración del servicio** y solo se ofrece un hueco si cabe entero en un tramo libre. Un servicio de 30 min ofrece huecos de 30; uno de 45, de 45; el de 120, de 2 horas. (Si quieres otro ritmo para un servicio, rellena "Hueco" en sus ajustes.)
+3. **Modo de huecos** (ajustes → *Cómo se ofrecen los huecos*):
+   - **Sin restos (recomendado, por defecto):** ofrece las horas redondas y también las **pegadas a otras citas**, pero **nunca un hueco que deje un resto libre más corto que tu servicio más corto** (ese resto no se podría vender). El "servicio más corto" se recalcula solo si añades o quitas servicios.
+   - **Compacto:** solo horas pegadas al inicio o al final de un tramo libre. Día lo más seguido posible, con menos opciones.
+   - **Libre:** rejilla fija por servicio, sin regla de restos.
+4. **Al cancelar, el hueco se vuelve a ofrecer al instante**, y la cita desaparece de la agenda (con "Mostrar canceladas" puedes verlas).
+
+Ejemplo (mañana de 10:00 a 14:00, ya hay una cita de 30 min a las 10:30, servicio de 45 min): *Libre* ofrece 11:30, 12:15, 13:00; *Sin restos* ofrece 11:00, 11:30, 11:45, 12:15, 12:30, 13:00, 13:15; *Compacto* ofrece 11:00, 11:45, 12:30, 13:15.
+
+Contrapartida: ocultar un hueco que dejaría un resto inútil puede quitar alguna opción a la clienta. Si prefieres ofrecer todo, usa el modo *Libre*.
+
+## Pruebas de reservas y cancelaciones
+
+`scripts/e2e.mjs` comprueba contra una instancia real: que los huecos de cada servicio coinciden con un **modelo de referencia escrito aparte de la consulta SQL** (en el modo configurado), preaviso, bloquear → confirmar → cancelar → hueco libre otra vez, ningún solape entre servicios, carrera de seis personas sobre el mismo hueco, recordatorio programado y lista de espera.
+
+```bash
+docker compose up -d --build
+DATABASE_URL=postgres://prodiva:prodiva@localhost:5433/prodiva BASE_URL=http://localhost:3100 npm run test:e2e
+```
+⚠️ Crea y cancela citas llamadas "E2E Test" en esa base de datos y las borra al terminar. Úsalo en local o en una base de datos de pruebas.
+
+## Hero: mini-reserva, "elige tu color" y titular que respira
+
+- **Agenda en vivo:** `/admin` se refresca sola cada 30 s; una cita cancelada desaparece de la agenda y su hueco vuelve a ofrecerse.
+- **Botón Atrás:** en la reserva y en el modo fácil, el botón Atrás del móvil o del navegador vuelve al paso anterior en vez de salir de la página.
+- **Mini-reserva:** elige servicio, ve los próximos huecos reales y pulsa uno: la reserva se abre con el hueco ya bloqueado y en el paso de datos. Si quedan pocos huecos esta semana (12 o menos) se muestra el número real; si hay muchos, no se muestra nada (nunca se inventa escasez).
+- **Mano interactiva:** al elegir un esmalte, las uñas cambian de color. El color viaja a la cita ("Color: Rosa chicle") en los comentarios. **La paleta de `src/lib/polish.ts` es de ejemplo: cámbiala por vuestros esmaltes reales.**
+- **Titular:** al mover el ratón, las palabras cercanas se engrosan (eje de grosor de la fuente). En móvil se queda quieto.
+- Fondo: `/videos/hero.mp4` si existe; si no, fondo animado con pétalos.
+
 ## Notificaciones y recordatorios (evitar huecos y "no shows")
 
 **Qué pasa con cada cita**
@@ -93,6 +128,7 @@ En local: `curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost
 
 Una versión aparte, **solo para pedir cita**, pensada para quien no se maneja con la web:
 una pregunta por pantalla, botones enormes, sin calendario, con "Llamar" siempre visible, y recuerda la cita en el móvil.
+Recuerda tu nombre y tu última cita (botón **Repetir**), tiene **letra grande**, barra de progreso (*Paso 2 de 4*), calendario al terminar y **"Prefiero que me llamen"** (avisa a la dueña por Telegram y queda en `/admin`).
 Es una **PWA instalable**: se añade a la pantalla de inicio con su icono y se abre a pantalla completa.
 
 - Dirección para compartir o imprimir en el centro: `https://prodivas.vercel.app/cita` (genera un código QR con cualquier generador gratuito).
@@ -109,7 +145,7 @@ UPDATE services SET price_cents = 2000, duration_min = 50 WHERE slug = 'manicura
 UPDATE business_hours SET open_time = '09:30', close_time = '19:30' WHERE weekday BETWEEN 1 AND 5;
 INSERT INTO staff (name, sort) VALUES ('Nombre', 2);   -- 2.ª profesional: aparece el paso "¿Con quién?"
 ```
-Reglas del salón (paso de los huecos, preaviso, días máximos, duración del bloqueo) en `.env`.
+Reglas del salón (preaviso, días máximos, duración del bloqueo) en `.env`. El tamaño de los huecos sale de la duración de cada servicio (ver más abajo).
 
 ## Cómo funciona el bloqueo
 

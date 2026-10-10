@@ -1,10 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { ArrowLeft, Check, Eye, Flower2, Hand, Lock, MapPin, Sparkles, type LucideIcon } from "lucide-react";
+import { ArrowLeft, CalendarPlus, Check, Eye, Flower2, Hand, Lock, MapPin, Sparkles, type LucideIcon } from "lucide-react";
 import { addDays } from "@/lib/dates";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtPrice } from "@/lib/format";
 import type { Service } from "./BookingFlow";
+import { icsHref } from "@/lib/ics";
+import { useStepHistory } from "@/lib/useStepHistory";
+import CallbackForm from "./CallbackForm";
+import PetalBurst from "./PetalBurst";
 import WaitlistForm from "./WaitlistForm";
 
 type Step = "home" | "category" | "service" | "day" | "time" | "details" | "done";
@@ -12,6 +16,15 @@ type Slot = { day: string; time: string; startsAt: string; available: boolean };
 type Hold = { holdId: string; holdToken: string; startsAt: string; deadline: number };
 type Last = { code: string; token: string; startsAt: string; serviceName: string };
 type Done = Last & { endsAt: string };
+type Profile = { name: string; phone: string; slug: string; serviceName: string };
+
+const buzz = () => {
+  try {
+    navigator.vibrate?.(12);
+  } catch {
+    /* sin vibración */
+  }
+};
 
 const iconFor = (cat: string): LucideIcon =>
   /manicura|pedicura|u(ñ|n)as/i.test(cat) ? Hand : /mirada|pesta|ceja/i.test(cat) ? Eye : /depila/i.test(cat) ? Sparkles : Flower2;
@@ -51,6 +64,8 @@ export default function EasyBooking({
   const [form, setForm] = useState({ name: "", phone: "" });
   const [done, setDone] = useState<Done | null>(null);
   const [last, setLast] = useState<Last | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [xl, setXl] = useState(false);
   const holdRef = useRef<Hold | null>(null);
 
   useEffect(() => {
@@ -69,6 +84,28 @@ export default function EasyBooking({
       /* sin almacenamiento: no pasa nada */
     }
   }, []);
+
+  // Perfil recordado en este móvil: saludo, "repetir mi cita" y datos ya escritos
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("pd_profile");
+      if (raw) {
+        const p = JSON.parse(raw) as Profile;
+        setProfile(p);
+        setForm((f) => ({ name: f.name || p.name, phone: f.phone || p.phone }));
+      }
+      if (localStorage.getItem("pd_xl") === "1") setXl(true);
+    } catch {
+      /* nada */
+    }
+  }, []);
+  useEffect(() => {
+    if (xl) document.documentElement.dataset.xl = "1";
+    else delete document.documentElement.dataset.xl;
+    return () => {
+      delete document.documentElement.dataset.xl;
+    };
+  }, [xl]);
 
   const categories = useMemo(() => Array.from(new Set(services.map((s) => s.category))), [services]);
 
@@ -130,7 +167,7 @@ export default function EasyBooking({
   const afternoon = times.filter((s) => Number(s.time.slice(0, 2)) >= 15);
   const remaining = hold ? Math.max(0, Math.ceil((hold.deadline - now) / 1000)) : 0;
 
-  function back() {
+  function stepBack(): boolean {
     setNotice(null);
     if (step === "category") setStep("home");
     else if (step === "service") setStep("category");
@@ -139,7 +176,11 @@ export default function EasyBooking({
       dropHold();
       setStep("day");
     } else if (step === "details") setStep("time");
+    else if (step === "done") restart();
+    else return false;
+    return true;
   }
+  const back = useStepHistory(step, stepBack);
 
   async function pickTime(slot: Slot) {
     if (!service || busy) return;
@@ -198,6 +239,7 @@ export default function EasyBooking({
       setStep("done");
       try {
         localStorage.setItem("pd_last", JSON.stringify({ code: b.code, token: b.token, startsAt: b.startsAt, serviceName: b.serviceName }));
+        localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, slug: service?.slug ?? "", serviceName: b.serviceName }));
       } catch {
         /* nada */
       }
@@ -205,6 +247,31 @@ export default function EasyBooking({
       setNotice("No hay conexión. Tu hueco sigue guardado: inténtalo otra vez.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  function repeatLast() {
+    const svc = services.find((x) => x.slug === profile?.slug);
+    if (!svc) {
+      setStep("category");
+      return;
+    }
+    buzz();
+    setCategory(svc.category);
+    setService(svc);
+    setSlots(null);
+    setDay(null);
+    setShowAllDays(false);
+    setStep("day");
+  }
+
+  function toggleXl() {
+    const next = !xl;
+    setXl(next);
+    try {
+      localStorage.setItem("pd_xl", next ? "1" : "0");
+    } catch {
+      /* nada */
     }
   }
 
@@ -221,6 +288,8 @@ export default function EasyBooking({
     if (raw) setLast(JSON.parse(raw) as Last);
   }
 
+  const stepNo = step === "category" || step === "service" ? 1 : step === "day" ? 2 : step === "time" ? 3 : step === "details" ? 4 : 0;
+
   const Back = () => (
     <button type="button" className="easy__back" onClick={back}>
       <ArrowLeft size={26} aria-hidden="true" /> Atrás
@@ -229,8 +298,20 @@ export default function EasyBooking({
 
   return (
     <div className="easy">
+      <div className="easy__tools">
+        <button type="button" className="easy__tool" aria-pressed={xl} onClick={toggleXl}>
+          {xl ? "Letra normal" : "Letra grande"}
+        </button>
+      </div>
+      {stepNo > 0 && (
+        <div className="easy__progress" role="progressbar" aria-valuemin={1} aria-valuemax={4} aria-valuenow={stepNo} aria-label={`Paso ${stepNo} de 4`}>
+          <span>Paso {stepNo} de 4</span>
+          <div><i style={{ width: `${stepNo * 25}%` }} /></div>
+        </div>
+      )}
       {notice && <p className="notice notice--error easy__notice" role="alert">{notice}</p>}
 
+      <div key={step} className="easy__step">
       {step === "home" && (
         <>
           {last && (
@@ -241,10 +322,23 @@ export default function EasyBooking({
               <a className="easy__btn easy__btn--soft" href={`/c/${last.code}?t=${last.token}`}>Ver, confirmar o cancelar</a>
             </section>
           )}
-          <h1 className="easy__h">¿Quieres pedir cita?</h1>
-          <button type="button" className="easy__btn easy__btn--main" onClick={() => setStep("category")}>
-            Pedir cita
+          <h1 className="easy__h">{profile?.name ? `Hola, ${profile.name.split(" ")[0]}` : "¿Quieres pedir cita?"}</h1>
+          {profile?.slug && services.some((x) => x.slug === profile.slug) && (
+            <button type="button" className="easy__btn easy__btn--main" onClick={repeatLast}>
+              Repetir: {profile.serviceName}
+            </button>
+          )}
+          <button
+            type="button"
+            className={`easy__btn ${profile?.slug ? "easy__btn--soft" : "easy__btn--main"}`}
+            onClick={() => {
+              buzz();
+              setStep("category");
+            }}
+          >
+            {profile?.slug ? "Pedir otra cosa" : "Pedir cita"}
           </button>
+          <CallbackForm initialName={profile?.name ?? ""} initialPhone={profile?.phone ?? ""} />
         </>
       )}
 
@@ -256,7 +350,7 @@ export default function EasyBooking({
             {categories.map((c) => {
               const Icon = iconFor(c);
               return (
-                <button key={c} type="button" className="easy__btn easy__btn--tile" onClick={() => { setCategory(c); setStep("service"); }}>
+                <button key={c} type="button" className="easy__btn easy__btn--tile" onClick={() => { buzz(); setCategory(c); setStep("service"); }}>
                   <Icon size={34} aria-hidden="true" /> {c}
                 </button>
               );
@@ -302,11 +396,12 @@ export default function EasyBooking({
             <>
               <p className="easy__sub">No quedan huecos en los próximos días.</p>
               <WaitlistForm serviceId={service.id} day={null} source="app" startOpen />
+              <CallbackForm initialName={profile?.name ?? ""} initialPhone={profile?.phone ?? ""} />
             </>
           )}
           <div className="easy__list">
             {(showAllDays ? days : days.slice(0, 6)).map((d) => (
-              <button key={d} type="button" className="easy__btn easy__btn--tile" onClick={() => { setDay(d); setStep("time"); }}>
+              <button key={d} type="button" className="easy__btn easy__btn--tile" onClick={() => { buzz(); setDay(d); setStep("time"); }}>
                 {dayLabel(d)}
               </button>
             ))}
@@ -372,11 +467,19 @@ export default function EasyBooking({
 
       {step === "done" && done && (
         <section className="easy__done">
+          <PetalBurst />
           <span className="easy__tick"><Check size={56} aria-hidden="true" /></span>
           <h1 className="easy__h">¡Cita confirmada!</h1>
           <p className="easy__when">{fmtLong(done.startsAt)}</p>
           <p>{done.serviceName}</p>
           <p className="easy__sub">El mismo día te escribiremos para que confirmes con un toque.</p>
+          <a
+            className="easy__btn easy__btn--soft"
+            href={icsHref({ code: done.code, title: `${done.serviceName} en Pro Diva`, startsAt: done.startsAt, endsAt: done.endsAt, location: address })}
+            download={`cita-prodiva-${done.code}.ics`}
+          >
+            <CalendarPlus size={26} aria-hidden="true" /> Añadir al calendario
+          </a>
           <a className="easy__btn easy__btn--soft" href={mapsUrl} target="_blank" rel="noopener noreferrer">
             <MapPin size={26} aria-hidden="true" /> Cómo llegar
           </a>
@@ -384,6 +487,7 @@ export default function EasyBooking({
           <button type="button" className="easy__btn easy__btn--main" onClick={restart}>Terminar</button>
         </section>
       )}
+      </div>
     </div>
   );
 }

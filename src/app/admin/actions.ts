@@ -110,3 +110,10 @@ export async function removeWaitlistAction(fd: FormData) {
   revalidatePath("/admin");
   back(str(fd, "day"));
 }
+
+export async function doneCallbackAction(fd: FormData) {
+  await guard();
+  await query(`UPDATE callbacks SET status = 'DONE' WHERE id = $1::bigint`, [z.coerce.number().int().positive().parse(str(fd, "id"))]);
+  revalidatePath("/admin");
+  back(str(fd, "day"));
+}

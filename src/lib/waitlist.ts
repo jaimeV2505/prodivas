@@ -67,23 +67,25 @@ export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<
     email: string | null;
     part: string;
     duration_min: number;
+    step_min: number;
     service_name: string;
   }>(
-    `SELECT w.id, w.name, w.phone, w.email, w.part, s.duration_min, s.name AS service_name
+    `SELECT w.id, w.name, w.phone, w.email, w.part, s.duration_min, COALESCE(s.slot_step_min, s.duration_min) AS step_min, s.name AS service_name
      FROM waitlist w JOIN services s ON s.id = w.service_id AND s.active
      WHERE w.status = 'ACTIVE' AND (w.day = $1::date OR (w.day IS NULL AND $1::date <= $2::date + 14))
      ORDER BY w.created_at LIMIT 40`,
     [freedDay, today],
   );
 
-  const cache = new Map<number, SlotRow[]>();
+  const cache = new Map<string, SlotRow[]>();
   let notified = 0;
   for (const w of entries) {
     if (notified >= maxPeople) break;
-    let rows = cache.get(w.duration_min);
+    const key = `${w.duration_min}:${w.step_min}`;
+    let rows = cache.get(key);
     if (!rows) {
-      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: w.duration_min });
-      cache.set(w.duration_min, rows);
+      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: w.duration_min, stepMin: w.step_min });
+      cache.set(key, rows);
     }
     const dur = w.duration_min * 60_000;
     const fit = rows.find((r) => {

@@ -19,7 +19,7 @@ Siempre: una sola toma continua, cámara estable, sin texto, sin logos, sin cara
 
 | Archivo | Formato | Duración | Prompt |
 | --- | --- | --- | --- |
-| `hero.mp4` | 16:9 | 6 s | Macro cinematográfico de manos con manicura semipermanente rosa brillante sobre seda rosa pálido en un salón luminoso. Pétalos rosas y blancos caen despacio. Dolly-in lento y continuo, poca profundidad de campo. |
+| `hero.mp4` | 16:9 | 6 s (bucle, sin cortes) | Macro cinematográfico de manos con manicura semipermanente rosa brillante sobre seda rosa pálido en un salón luminoso. Pétalos rosas y blancos caen despacio. Dolly-in lento y continuo, poca profundidad de campo. |
 | `nails.mp4` | 4:3 | 5 s | Primer plano de una mano mientras pintan una uña con esmalte rosa chicle; el pincel se desliza con suavidad. Fondo blush desenfocado, reflejos suaves. |
 | `eyes.mp4` | 4:3 | 5 s | Primer plano de un ojo con pestañas naturales levantadas y cejas definidas, luz rosada de estudio; pétalos diminutos cruzan el plano. Empuje lento. |
 | `wax.mp4` | 4:3 | 5 s | Hilo de depilación y piel suave en primer plano, hojas verdes y flores rosas desenfocadas al fondo, movimiento lento y limpio. |
@@ -34,7 +34,3 @@ Siempre: una sola toma continua, cámara estable, sin texto, sin logos, sin cara
 ./scripts/optimize-videos.sh ~/Downloads/prodiva-videos     # crea public/videos/*.mp4 y *.jpg
 git add public/videos && git commit -m "Vídeos de la web" && git push
 ```
-
-Opcional, hero con scroll: si prefieres que el hero avance al hacer scroll en vez de reproducirse en bucle,
-usa `./scripts/extract-frames.sh public/videos/hero.mp4 90` (crea `public/frames/`) y define `NEXT_PUBLIC_HERO_FRAMES=90`.
-Los fotogramas tienen prioridad sobre `hero.mp4`.

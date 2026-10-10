@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import AutoRefresh from "@/components/AutoRefresh";
 import { isAdmin } from "@/lib/auth";
 import { CONFIG } from "@/lib/config";
 import { addDays, isDay, todayIn } from "@/lib/dates";
@@ -13,6 +14,7 @@ import {
   logout,
   removeTimeOffAction,
   removeWaitlistAction,
+  doneCallbackAction,
 } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -35,12 +37,13 @@ type Row = {
   reminder_sent_at: string | null;
 };
 type WaitRow = { id: string; day: string | null; part: string; name: string; phone: string; status: string; service_name: string };
+type CallRow = { id: number; name: string; phone: string; created: string };
 type OffRow = { id: number; day: string; t_start: string; t_end: string; staff_name: string | null; reason: string | null };
 
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ d?: string; err?: string }>;
+  searchParams: Promise<{ d?: string; err?: string; c?: string }>;
 }) {
   const sp = await searchParams;
 
@@ -65,7 +68,7 @@ export default async function AdminPage({
   const today = todayIn(CONFIG.tz);
   const day = sp.d && isDay(sp.d) ? sp.d : today;
 
-  const [bookings, services, staff, timeOff, waitlist] = await Promise.all([
+  const [bookings, services, staff, timeOff, waitlist, callbacks] = await Promise.all([
     query<Row>(
       `SELECT b.id, b.code, b.status, b.source,
               to_char(b.starts_at AT TIME ZONE $2::text, 'HH24:MI') AS t_start,
@@ -76,9 +79,9 @@ export default async function AdminPage({
        JOIN services s ON s.id = b.service_id
        JOIN staff st ON st.id = b.staff_id
        WHERE (b.starts_at AT TIME ZONE $2::text)::date = $1::date
-         AND (b.status IN ('CONFIRMED','CANCELLED') OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
+         AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()) OR ($3::boolean AND b.status = 'CANCELLED'))
        ORDER BY b.starts_at`,
-      [day, CONFIG.tz],
+      [day, CONFIG.tz, sp.c === "1"],
     ),
     query<{ id: number; name: string; duration_min: number }>(
       `SELECT id, name, duration_min FROM services WHERE active ORDER BY sort, id`,
@@ -100,6 +103,11 @@ export default async function AdminPage({
        WHERE w.status IN ('ACTIVE','NOTIFIED')
        ORDER BY w.day NULLS LAST, w.created_at LIMIT 40`,
     ),
+    query<CallRow>(
+      `SELECT id, name, phone, to_char(created_at AT TIME ZONE $1::text, 'DD/MM HH24:MI') AS created
+       FROM callbacks WHERE status = 'NEW' ORDER BY created_at LIMIT 20`,
+      [CONFIG.tz],
+    ),
   ]);
 
   const confirmed = bookings.filter((b) => b.status === "CONFIRMED");
@@ -107,9 +115,13 @@ export default async function AdminPage({
 
   return (
     <main className="container admin">
+      <AutoRefresh />
       <header className="admin__bar">
         <h1>Agenda</h1>
-        <form action={logout}><button className="btn btn--ghost btn--sm" type="submit">Salir</button></form>
+        <div className="admin__bar-actions">
+          <Link className="btn btn--ghost btn--sm" href="/admin/ajustes">Ajustes</Link>
+          <form action={logout}><button className="btn btn--ghost btn--sm" type="submit">Salir</button></form>
+        </div>
       </header>
 
       {sp.err && <p className="notice notice--error" role="alert">{sp.err}</p>}
@@ -123,6 +135,8 @@ export default async function AdminPage({
 
       <p className="muted">
         {confirmed.length} {confirmed.length === 1 ? "cita" : "citas"} · {fmtPrice(revenue)} previstos
+        {" · "}
+        <Link href={`/admin?d=${day}${sp.c === "1" ? "" : "&c=1"}`}>{sp.c === "1" ? "Ocultar canceladas" : "Mostrar canceladas"}</Link>
       </p>
 
       {bookings.length === 0 && <p className="panel muted">No hay citas este día.</p>}
@@ -164,6 +178,27 @@ export default async function AdminPage({
           </li>
         ))}
       </ul>
+
+      {callbacks.length > 0 && (
+        <section className="panel">
+          <h2 className="panel__title panel__title--sm">Quieren que las llames ({callbacks.length})</h2>
+          <ul className="timeoff">
+            {callbacks.map((c) => (
+              <li key={c.id}>
+                <span>
+                  <b>{c.name}</b> · <a href={`tel:${c.phone}`}>{c.phone}</a> · <a href={waLink(c.phone)} target="_blank" rel="noopener noreferrer">WhatsApp</a>
+                  <small className="muted"> ({c.created})</small>
+                </span>
+                <form action={doneCallbackAction}>
+                  <input type="hidden" name="id" value={c.id} />
+                  <input type="hidden" name="day" value={day} />
+                  <button className="btn btn--ghost btn--sm" type="submit">Hecha</button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {waitlist.length > 0 && (
         <section className="panel">

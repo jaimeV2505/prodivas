@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import ResponseButtons from "@/components/ResponseButtons";
 import { getBookingByCode } from "@/lib/bookings";
 import { CONFIG } from "@/lib/config";
@@ -21,7 +22,7 @@ export default async function ConfirmPage({
 
   return (
     <main className="easy easy--narrow">
-      <p className="easy__brand">Pro Diva</p>
+      <Link href="/cita" className="easy__brand">Pro Diva</Link>
       {!booking || booking.status === "HOLD" || booking.status === "EXPIRED" ? (
         <section className="easy__card">
           <h1 className="easy__h">No encontramos tu cita</h1>

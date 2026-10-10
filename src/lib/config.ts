@@ -1,6 +1,5 @@
 export const CONFIG = {
   tz: process.env.SALON_TIMEZONE ?? "Europe/Madrid",
-  slotStepMin: Number(process.env.SLOT_STEP_MIN ?? 15),
   minNoticeMin: Number(process.env.MIN_NOTICE_MIN ?? 120),
   maxDaysAhead: Number(process.env.MAX_DAYS_AHEAD ?? 60),
   holdMinutes: Number(process.env.HOLD_MINUTES ?? 10),

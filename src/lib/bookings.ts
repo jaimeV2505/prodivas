@@ -162,9 +162,10 @@ export async function createHold(input: {
     // Limpieza perezosa de bloqueos caducados
     await q(`UPDATE bookings SET status = 'EXPIRED' WHERE status = 'HOLD' AND hold_expires_at <= now()`);
 
-    const svc = (await q(`SELECT id, duration_min FROM services WHERE id = $1::int AND active`, [
-      input.serviceId,
-    ])) as unknown as { id: number; duration_min: number }[];
+    const svc = (await q(
+      `SELECT id, duration_min, COALESCE(slot_step_min, duration_min) AS step_min FROM services WHERE id = $1::int AND active`,
+      [input.serviceId],
+    )) as unknown as { id: number; duration_min: number; step_min: number }[];
     if (!svc[0]) throw new BookingError("NOT_FOUND", "Ese servicio ya no está disponible.", 404);
 
     // Anti-abuso: como mucho N bloqueos vivos por IP; el más antiguo se libera
@@ -196,7 +197,7 @@ export async function createHold(input: {
     }
 
     const rows = await getSlotRows(
-      { from: day, to: day, durationMin: svc[0].duration_min, staffId: input.staffId },
+      { from: day, to: day, durationMin: svc[0].duration_min, stepMin: svc[0].step_min, staffId: input.staffId },
       q,
     );
     const target = new Date(input.startsAt).getTime();
