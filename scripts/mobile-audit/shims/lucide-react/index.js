@@ -21,6 +21,7 @@ exports.MapPin = Icon;
 exports.MessageCircle = Icon;
 exports.Phone = Icon;
 exports.Share = Icon;
+exports.Smartphone = Icon;
 exports.Sparkles = Icon;
 exports.Star = Icon;
 exports.X = Icon;

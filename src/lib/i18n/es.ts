@@ -18,7 +18,6 @@ export const es = {
   moreSlots: "Más huecos para elegir",
   chooseSlot: "Elige tu hueco",
   chooseSlotFor: "Elige la hora de {name}",
-  language: "Idioma",
   // tu visita
   yourVisit: "Tu cita",
   allTogether: "Todo seguido",

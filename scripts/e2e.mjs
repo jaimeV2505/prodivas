@@ -732,7 +732,7 @@ try {
     }
 
     /* 3h ------------------------------------------------------------- */
-    section("3h. Notificaciones: idioma por cita, recordatorio de la víspera, valoración privada, baja y después de la visita");
+    section("3h. Notificaciones: recordatorio de la víspera, valoración privada, baja y después de la visita");
     {
       const { createHmac } = await import("node:crypto");
       const svc = (await db.query(`SELECT id, duration_min FROM services WHERE active ORDER BY sort, id LIMIT 1`)).rows[0];
@@ -750,18 +750,6 @@ try {
       };
       const today = `(((now() AT TIME ZONE '${TZ}')::date)`;
       const at = (hhmm) => `(${today} + time '${hhmm}') AT TIME ZONE '${TZ}')`;
-
-      // 1) el idioma de la clienta se guarda en la cita (y uno inventado se rechaza)
-      const sl = ((await api(`/api/availability?serviceIds=${svc.id}&from=${addDays(from, 5)}&to=${addDays(from, 12)}`)).json?.slots ?? []).find((x) => x.available);
-      if (sl) {
-        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [svc.id], staffId: null, startsAt: sl.startsAt } });
-        const bad = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014", lang: "fr" } });
-        check(bad.status === 400, "un idioma inventado se rechaza", String(bad.status));
-        const ok = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014", lang: "gl" } });
-        const row = (await db.query(`SELECT lang FROM bookings WHERE id = $1`, [h.json?.holdId])).rows[0];
-        check(ok.status === 200 && row?.lang === "gl", "el idioma elegido (gallego) queda guardado en la cita", JSON.stringify(row));
-        if (ok.json?.booking) await api("/api/respond", { method: "POST", body: { code: ok.json.booking.code, token: ok.json.booking.token, action: "cancel" } });
-      }
 
       // 2) recordatorio de la víspera: solo a quien toca (se comprueba a través del cron real)
       if (process.env.CRON_SECRET && hourNow >= 8 && hourNow < 15) {

@@ -8,7 +8,7 @@ import { discounted, matchPack, suggest } from "@/lib/combos";
 import { colorFromNotes, dueRetouch, lastColor } from "@/lib/recs";
 import { addDays, daysInMonth } from "@/lib/dates";
 import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice, fmtShortDay, localParts, weekdayName, weekInitials } from "@/lib/format";
-import { fill, getDict, LOCALE, localCategory, localized, MONEY_LOCALE, type Dict, type Lang } from "@/lib/i18n";
+import { fill, getDict, LOCALE, type Dict } from "@/lib/i18n";
 import { loadVisitHistory, saveBooking, saveVisitHistory, usualOf, type VisitRecord } from "@/lib/myBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
 import type { Trend } from "@/lib/trends";
@@ -18,7 +18,6 @@ import Quiz from "./Quiz";
 import RebookCard from "./RebookCard";
 import WaitlistForm from "./WaitlistForm";
 
-type I18nJson = Partial<Record<"gl" | "en", { name?: string; description?: string }>>;
 export type Service = {
   id: number;
   slug: string;
@@ -34,9 +33,9 @@ export type Service = {
 };
 export type Staff = { id: number; name: string };
 /** Extra que suma tiempo y precio (retirada de esmalte, nail art…). */
-export type Addon = { id: number; slug: string; name: string; description: string | null; durationMin: number; priceCents: number; category: string | null; i18n?: I18nJson };
+export type Addon = { id: number; slug: string; name: string; description: string | null; durationMin: number; priceCents: number; category: string | null };
 /** Pack: combinación de servicios ya pensada, con descuento opcional. */
-export type Pack = { id: number; slug: string; name: string; emoji: string; description: string | null; serviceSlugs: string[]; discountPercent: number; occasion?: string | null; people?: number; featured?: boolean; i18n?: I18nJson & Partial<Record<"gl" | "en", { occasion?: string }>> };
+export type Pack = { id: number; slug: string; name: string; emoji: string; description: string | null; serviceSlugs: string[]; discountPercent: number; occasion?: string | null; people?: number; featured?: boolean };
 type Slot = { day: string; time: string; startsAt: string; available: boolean; staffIds: number[] };
 type Hold = {
   holdId: string;
@@ -67,7 +66,6 @@ type Props = {
   staff: Staff[];
   addons?: Addon[];
   packs?: Pack[];
-  lang?: Lang;
   depositPolicy?: "service" | "repeat";
   initialSlug?: string;
   initialDay?: string;
@@ -109,7 +107,6 @@ export default function BookingFlow({
   staff,
   addons = [],
   packs = [],
-  lang = "es",
   depositPolicy = "service",
   initialSlug,
   initialDay,
@@ -125,23 +122,20 @@ export default function BookingFlow({
   refundHours = 24,
 }: Props) {
   const reduce = useReducedMotion();
-  const T = getDict(lang);
-  const locale = LOCALE[lang];
+  const T = getDict();
+  const locale = LOCALE;
   const t = (k: keyof Dict, v?: Record<string, string | number>) => fill(T[k], v);
-  const L = (x: { slug?: string; name: string; description?: string | null; i18n?: I18nJson }) => localized(x, lang);
-  const money = (c: number) => fmtPrice(c, MONEY_LOCALE[lang]);
+  const L = (x: { name: string; description?: string | null }) => ({ name: x.name, description: x.description ?? null });
+  const money = (c: number) => fmtPrice(c);
   const weekInit = useMemo(() => weekInitials(locale), [locale]);
-  useEffect(() => {
-    document.documentElement.lang = lang;
-  }, [lang]);
 
   const multiStaff = staff.length > 1;
   const stepOrder: Step[] = multiStaff ? ["service", "staff", "time", "details"] : ["service", "time", "details"];
   const stepLabel: Record<string, string> = { service: T.stepService, staff: T.stepStaff, time: T.stepTime, details: T.stepDetails };
 
-  // Mensaje de error en el idioma de la clienta (en castellano se enseña el del servidor, que es más concreto)
+  // Mensaje de error: el del servidor (más concreto) o uno genérico según el código
   const errText = (code: string | undefined, fallback: string, serverMsg?: string) => {
-    if (lang === "es" && serverMsg) return serverMsg;
+    if (serverMsg) return serverMsg;
     const map: Record<string, string> = { SLOT_TAKEN: T.errSlotTaken, HOLD_EXPIRED: T.errHoldExpired, NOT_FOUND: T.errNotFound, CONFLICT: T.errConflict, LIMIT: T.errLimit, INVALID: T.errInvalid };
     return (code && map[code]) || fallback;
   };
@@ -241,7 +235,7 @@ export default function BookingFlow({
       setNotice((n) => n ?? { tone: "error", text: T.loadFail });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [availKey, staffChoice, month, lang]);
+  }, [availKey, staffChoice, month]);
 
   // Carga + sondeo cada 15 s + al volver a la pestaña: los huecos que otra persona
   // bloquea aparecen candados casi en tiempo real.
@@ -760,7 +754,7 @@ export default function BookingFlow({
   function composeNotes(): string {
     const own = form.notes.trim();
     if (!compServices.length || !compName.trim()) return own;
-    const line = fill(getDict("es").companionNote, { name: compName.trim(), services: compServices.map((s) => s.name).join(" + ") });
+    const line = fill(getDict().companionNote, { name: compName.trim(), services: compServices.map((s) => s.name).join(" + ") });
     return (own ? `${line}\n${own}` : line).slice(0, 500);
   }
 
@@ -770,7 +764,7 @@ export default function BookingFlow({
     if (submitting || !allHeld || !allAcked) return;
     setSubmitting(true);
     setNotice(null);
-    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, lang, ...(kinds.length ? { acks: [...kinds] } : {}) };
+    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, ...(kinds.length ? { acks: [...kinds] } : {}) };
     try {
       const r = await fetch(apart ? "/api/bookings/batch" : "/api/bookings", {
         method: "POST",
@@ -887,7 +881,7 @@ export default function BookingFlow({
     }
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [soon, history, lang, today]);
+  }, [soon, history, today]);
 
   // Entrada 260 ms ease-out; salida más rápida (140 ms). Con "reducir movimiento" se mantiene solo el fundido.
   // `transform` completo (no x/y) para que la animación no dependa del hilo principal.
@@ -988,7 +982,6 @@ export default function BookingFlow({
                   </button>
                 )}
                 <Quiz
-                  lang={lang}
                   catalog={services.map((x) => x.slug)}
                   addonSlugs={addons.map((x) => x.slug)}
                   onPick={(slugs, addonSlug) => chooseVisit(slugs.map((sl) => services.find((x) => x.slug === sl)).filter((x): x is Service => !!x), { addonSlugs: addonSlug ? [addonSlug] : [] })}
@@ -1005,7 +998,7 @@ export default function BookingFlow({
                         const full = k * sv.reduce((a, s) => a + s.priceCents, 0);
                         const price = k * sv.reduce((a, s) => a + discounted(s.priceCents, p.discountPercent), 0);
                         const lp = L(p);
-                        const occ = p.occasion ? (lang === "es" ? p.occasion : (p.i18n?.[lang] as { occasion?: string } | undefined)?.occasion ?? p.occasion) : null;
+                        const occ = p.occasion ?? null;
                         return (
                           <li key={p.id}>
                             <button type="button" className={`pack ${p.featured ? "pack--featured" : ""}`} onClick={() => choosePack(p)} aria-label={`${lp.name}: ${T.packPick}`}>
@@ -1056,7 +1049,7 @@ export default function BookingFlow({
                 )}
                 {groups.map((g) => (
                   <div key={g.category} className="pick-group">
-                    <h3>{localCategory(g.category, lang)}</h3>
+                    <h3>{g.category}</h3>
                     <ul className="pick-list">
                       {g.items.map((s) => (
                         <li key={s.id}>
@@ -1335,7 +1328,6 @@ export default function BookingFlow({
                     day={day}
                     dayLabel={day ? fmtDayLabel(day, locale) : undefined}
                     source="web"
-                    lang={lang}
                     startOpen={Object.keys(dayInfo).length === 0}
                   />
                 )}
@@ -1517,7 +1509,7 @@ export default function BookingFlow({
                   const own = apart ? legs.map((l) => l.service) : [service, ...extras].filter((s): s is Service => !!s);
                   const rb = own.filter((s) => s.rebookWeeks);
                   return rb.length ? (
-                    <RebookCard lang={lang} today={today} maxDate={maxDate} baseStartsAt={doneAll[0].startsAt} services={rb} contact={{ name: form.name, phone: form.phone, email: form.email }} acks={[...kinds]} />
+                    <RebookCard today={today} maxDate={maxDate} baseStartsAt={doneAll[0].startsAt} services={rb} contact={{ name: form.name, phone: form.phone, email: form.email }} acks={[...kinds]} />
                   ) : null;
                 })()}
                 <button type="button" className="btn btn--primary btn--lg btn--block" onClick={reset}>{T.bookAnother}</button>
@@ -1590,9 +1582,8 @@ export default function BookingFlow({
       )}
       <BookingAvatar
         state={avatarState}
-        lang={lang}
         trends={trends}
-        services={services.map((s) => ({ slug: s.slug, name: L(s).name, category: localCategory(s.category, lang), durationMin: s.durationMin, priceCents: s.priceCents }))}
+        services={services.map((s) => ({ slug: s.slug, name: L(s).name, category: s.category, durationMin: s.durationMin, priceCents: s.priceCents }))}
         packs={packs.map((p) => ({ slug: p.slug, name: L(p).name, serviceSlugs: p.serviceSlugs, discountPercent: p.discountPercent, people: p.people }))}
         selected={visitServices.map((x) => x.slug)}
         step={step}

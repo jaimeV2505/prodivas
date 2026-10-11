@@ -3,7 +3,6 @@ import { CONFIG } from "./config";
 import { envNumber as num, EVENING_HOUR, inWindow, isQuiet, localHour, OPTIONAL_WINDOW } from "./quiet";
 import { query } from "./db";
 import { getSummaryById } from "./bookings";
-import { localized } from "./i18n";
 import { notifyAftercare, notifyOwnerUnconfirmed, notifyRebookNudge, notifyReminder } from "./notify";
 import { optoutUrl } from "./optout";
 import { runDeliveryFallback } from "./fallback";
@@ -160,8 +159,7 @@ export async function runAftercare(): Promise<number> {
   for (const { id } of claimed) {
     const b = await getSummaryById(id);
     if (!b || b.customerId == null) continue;
-    const lang = b.lang === "gl" || b.lang === "en" ? b.lang : "es";
-    if (await notifyAftercare(b, await aftercareFor(id, lang), optoutUrl(b.customerId))) n++;
+    if (await notifyAftercare(b, await aftercareFor(id), optoutUrl(b.customerId))) n++;
   }
   return n;
 }
@@ -186,8 +184,7 @@ export async function runRebookNudges(): Promise<number> {
     if (!claim.length) continue;
     const b = await getSummaryById(r.id);
     if (!b || b.customerId == null) continue;
-    const lang = b.lang === "gl" || b.lang === "en" ? b.lang : "es";
-    if (await notifyRebookNudge(b, localized({ slug: r.slug, name: r.name }, lang).name, r.weeks, optoutUrl(b.customerId))) n++;
+    if (await notifyRebookNudge(b, r.name, r.weeks, optoutUrl(b.customerId))) n++;
   }
   return n;
 }

@@ -1,8 +1,8 @@
 import { CONFIG } from "./config";
 import { todayIn, addDays } from "./dates";
 import { fmtLong, fmtPrice } from "./format";
-import { fill, LOCALE, type Lang } from "./i18n";
-import { msgDict, type MsgDict } from "./i18n/msg";
+import { fill } from "./i18n";
+import { msg } from "./i18n/msg";
 import type { BookingSummary } from "./bookings";
 import { enabled, logSend, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type Channel, type SendResult } from "./messaging";
 import { gsm, manageLink, siteUrl } from "./site";
@@ -13,29 +13,22 @@ const esc = (s: string) =>
 const hhmm = (iso: string) =>
   new Intl.DateTimeFormat("es-ES", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: CONFIG.tz }).format(new Date(iso));
 
-/** "hoy a las 17:00" / "mañana a las 09:30" / "Viernes 16 de octubre, 10:00" (también en gallego e inglés) */
-export function whenWords(iso: string, lang: Lang = "es"): string {
-  const m = msgDict(lang);
+/** "hoy a las 17:00" / "mañana a las 09:30" / "Viernes 16 de octubre, 10:00" */
+export function whenWords(iso: string): string {
+  const m = msg;
   const today = todayIn(CONFIG.tz);
   const day = todayIn(CONFIG.tz, new Date(iso));
   if (day === today) return fill(m.whenToday, { time: hhmm(iso) });
   if (day === addDays(today, 1)) return fill(m.whenTomorrow, { time: hhmm(iso) });
-  return fmtLong(iso, LOCALE[lang]);
+  return fmtLong(iso);
 }
 
-const langOf = (b: { lang?: string | null }): Lang => (b.lang === "gl" || b.lang === "en" ? b.lang : "es");
-const T = (b: { lang?: string | null }): MsgDict => msgDict(langOf(b));
 const salon = () => CONFIG.salon.name;
 
-/**
- * Plantilla de WhatsApp en el idioma de la clienta. En castellano se usa la configurada (o la de por defecto);
- * en gallego e inglés solo si has aprobado y configurado la plantilla de ese idioma (WA_TEMPLATE_X_GL / _EN).
- * Si no, no se manda por WhatsApp y salen el SMS y el email, que sí van en su idioma.
- */
-const WA_CODE: Record<Lang, string> = { es: process.env.WA_LANG_ES || "es", gl: process.env.WA_LANG_GL || "gl", en: process.env.WA_LANG_EN || "en" };
-function waIn(lang: Lang, envBase: string, def: string | null, params: string[], buttons: Parameters<typeof sendWhatsAppTemplate>[3]): Msg["wa"] {
-  const template = lang === "es" ? process.env[envBase] || def : process.env[`${envBase}_${lang.toUpperCase()}`] || null;
-  return template ? { template, params, buttons, lang: WA_CODE[lang] } : undefined;
+/** Plantilla de WhatsApp: la que hayas configurado en el .env (o la de por defecto). Si no hay plantilla, sale solo el SMS y el email. */
+function waIn(envBase: string, def: string | null, params: string[], buttons: Parameters<typeof sendWhatsAppTemplate>[3]): Msg["wa"] {
+  const template = process.env[envBase] || def;
+  return template ? { template, params, buttons } : undefined;
 }
 
 async function run(
@@ -57,7 +50,7 @@ async function run(
 type Person = { bookingId: string | null; phone: string | null; email: string | null };
 type Msg = {
   sms: string;
-  wa?: { template: string; params: string[]; buttons: Parameters<typeof sendWhatsAppTemplate>[3]; lang?: string };
+  wa?: { template: string; params: string[]; buttons: Parameters<typeof sendWhatsAppTemplate>[3] };
   email: { subject: string; html: string };
 };
 
@@ -69,7 +62,7 @@ async function toPerson(p: Person, kind: string, msg: Msg, opts: { optional?: bo
       p.bookingId,
       kind,
       "whatsapp",
-      () => sendWhatsAppTemplate(p.phone!, msg.wa!.template, msg.wa!.params, msg.wa!.buttons, msg.wa!.lang),
+      () => sendWhatsAppTemplate(p.phone!, msg.wa!.template, msg.wa!.params, msg.wa!.buttons),
       { fallbackSms: gsm(msg.sms), fallbackPhone: p.phone },
     );
     ok = ok || waOk;
@@ -102,13 +95,12 @@ function mailShell(title: string, body: string, buttons: { label: string; href: 
 
 export async function notifyBookingCreated(b: BookingSummary): Promise<void> {
   const link = manageLink(b.code, b.token);
-  const when = fmtLong(b.startsAt, LOCALE[langOf(b)]);
-  const m = T(b);
-  const lang = langOf(b);
+  const when = fmtLong(b.startsAt);
+  const m = msg;
   await Promise.all([
     toCustomer(b, "created", {
       sms: fill(m.createdSms, { service: b.serviceName, when, link }),
-      wa: waIn(lang, "WA_TEMPLATE_CREATED", "cita_confirmada", [b.customerName ?? "", b.serviceName, when], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
+      wa: waIn("WA_TEMPLATE_CREATED", "cita_confirmada", [b.customerName ?? "", b.serviceName, when], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
       email: {
         subject: fill(m.createdSubject, { salon: salon() }),
         html: mailShell(
@@ -122,7 +114,7 @@ export async function notifyBookingCreated(b: BookingSummary): Promise<void> {
       b,
       "owner_new",
       `<b>Nueva cita</b>\n${esc(b.serviceName)}\n${esc(fmtLong(b.startsAt))}\n${esc(b.customerName ?? "")}, ${esc(b.customerPhone ?? "")}${
-        b.lang && b.lang !== "es" ? `\n🌍 Idioma: ${b.lang === "gl" ? "gallego" : "inglés"}` : ""
+        ""
       }${b.depositStatus === "PAID" ? `\n💳 Señal pagada: ${esc(fmtPrice(b.depositCents))}` : ""}${b.notes ? `\n<i>${esc(b.notes)}</i>` : ""}`,
       `Nueva cita: ${b.customerName ?? ""}, ${fmtLong(b.startsAt)}`,
     ),
@@ -135,20 +127,19 @@ export async function notifyGroupCreated(list: BookingSummary[]): Promise<void> 
   if (list.length === 0) return;
   if (list.length === 1) return notifyBookingCreated(list[0]);
   const first = list[0];
-  const lang = langOf(first);
-  const m = T(first);
+  const m = msg;
   const link = manageLink(first.code, first.token);
-  const lines = list.map((b) => `${b.serviceName}: ${fmtLong(b.startsAt, LOCALE[lang])}`);
+  const lines = list.map((b) => `${b.serviceName}: ${fmtLong(b.startsAt)}`);
   const total = list.reduce((a, b) => a + b.priceCents, 0);
   await Promise.all([
     toCustomer(first, "created", {
       sms: fill(m.groupSms, { n: list.length, lines: lines.join("; "), link }),
-      wa: waIn(lang, "WA_TEMPLATE_CREATED", "cita_confirmada", [first.customerName ?? "", list.map((b) => b.serviceName).join(" + "), list.map((b) => fmtLong(b.startsAt, LOCALE[lang])).join(" · ")], [{ kind: "url", suffix: `${first.code}?t=${first.token.slice(0, 12)}` }]),
+      wa: waIn("WA_TEMPLATE_CREATED", "cita_confirmada", [first.customerName ?? "", list.map((b) => b.serviceName).join(" + "), list.map((b) => fmtLong(b.startsAt)).join(" · ")], [{ kind: "url", suffix: `${first.code}?t=${first.token.slice(0, 12)}` }]),
       email: {
         subject: fill(m.groupSubject, { n: list.length, salon: salon() }),
         html: mailShell(
           m.groupTitle,
-          `<p>${esc(fill(m.createdHello, { name: first.customerName ?? "" }))}</p><ul>${list.map((b) => `<li><b>${esc(b.serviceName)}</b> · ${esc(fmtLong(b.startsAt, LOCALE[lang]))}</li>`).join("")}</ul><p>${esc(m.groupNote)}</p>`,
+          `<p>${esc(fill(m.createdHello, { name: first.customerName ?? "" }))}</p><ul>${list.map((b) => `<li><b>${esc(b.serviceName)}</b> · ${esc(fmtLong(b.startsAt))}</li>`).join("")}</ul><p>${esc(m.groupNote)}</p>`,
           [{ label: m.groupButton, href: link, primary: true }],
         ),
       },
@@ -172,15 +163,14 @@ export async function notifyGroupCreated(list: BookingSummary[]): Promise<void> 
  * Devuelve true si salió por algún canal.
  */
 export async function notifyReminder(b: BookingSummary, step: "evening" | "final" | "second" = "final"): Promise<boolean> {
-  const lang = langOf(b);
-  const m = T(b);
+  const m = msg;
   const link = manageLink(b.code, b.token);
-  const words = whenWords(b.startsAt, lang);
+  const words = whenWords(b.startsAt);
   const name = b.customerName ?? "";
   const second = step === "second";
   return toCustomer(b, step === "evening" ? "reminder_evening" : second ? "reminder_second" : "reminder", {
     sms: fill(second ? m.remSms2 : m.remSms, { words, service: b.serviceName, link }),
-    wa: waIn(lang, "WA_TEMPLATE_REMINDER", "recordatorio_cita", [name, b.serviceName, words], [
+    wa: waIn("WA_TEMPLATE_REMINDER", "recordatorio_cita", [name, b.serviceName, words], [
       { kind: "quick_reply", payload: `C:${b.code}` },
       { kind: "quick_reply", payload: `X:${b.code}` },
     ]),
@@ -200,13 +190,12 @@ export async function notifyReminder(b: BookingSummary, step: "evening" | "final
 
 /** «Cerrar el día»: avisa a cada clienta de que hay que mover su cita, con un enlace para elegir otra hora o cancelar sin coste. */
 export async function notifyDayClosed(b: BookingSummary, note: string | null): Promise<void> {
-  const lang = langOf(b);
-  const m = T(b);
-  const when = fmtLong(b.startsAt, LOCALE[lang]);
+  const m = msg;
+  const when = fmtLong(b.startsAt);
   const link = manageLink(b.code, b.token);
   await toCustomer(b, "cancelled_by_centre", {
     sms: fill(m.closedSms, { when, note: note ? ` ${note}` : "", link }),
-    wa: waIn(lang, "WA_TEMPLATE_CLOSED", null, [b.customerName ?? "", when], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
+    wa: waIn("WA_TEMPLATE_CLOSED", null, [b.customerName ?? "", when], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
     email: {
       subject: fill(m.closedSubject, { salon: salon() }),
       html: mailShell(
@@ -219,8 +208,8 @@ export async function notifyDayClosed(b: BookingSummary, note: string | null): P
 }
 
 export async function notifyCancelledByCentre(b: BookingSummary): Promise<void> {
-  const m = T(b);
-  const when = fmtLong(b.startsAt, LOCALE[langOf(b)]);
+  const m = msg;
+  const when = fmtLong(b.startsAt);
   await toCustomer(b, "cancelled_by_centre", {
     sms: fill(m.centreSms, { when, phone: CONFIG.salon.phoneMobile }),
     email: {
@@ -235,8 +224,7 @@ export async function notifyCancelledByCentre(b: BookingSummary): Promise<void> 
  * respeta la baja de la clienta y por SMS solo sale si activas OPTIONAL_SMS=on.
  */
 export async function notifyAftercare(b: BookingSummary, care: string | null, optout: string): Promise<boolean> {
-  const lang = langOf(b);
-  const m = T(b);
+  const m = msg;
   const link = `${siteUrl()}/c/${b.code}/valora?t=${b.token}`;
   const name = b.customerName ?? "";
   return toCustomer(
@@ -244,7 +232,7 @@ export async function notifyAftercare(b: BookingSummary, care: string | null, op
     "aftercare",
     {
       sms: fill(m.afterSms, { name, care: care ? `${care.slice(0, 140)} ` : "", link }) + ` ${fill(m.optoutSms, { link: optout })}`,
-      wa: waIn(lang, "WA_TEMPLATE_AFTERCARE", null, [name, b.serviceName], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
+      wa: waIn("WA_TEMPLATE_AFTERCARE", null, [name, b.serviceName], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
       email: {
         subject: fill(m.afterSubject, { salon: salon() }),
         html:
@@ -261,16 +249,15 @@ export async function notifyAftercare(b: BookingSummary, care: string | null, op
 
 /** «Toca retoque»: unos días antes de que se cumplan las semanas del servicio. Mensaje opcional (con baja). */
 export async function notifyRebookNudge(b: BookingSummary, serviceName: string, weeks: number, optout: string): Promise<boolean> {
-  const lang = langOf(b);
-  const m = T(b);
-  const link = `${siteUrl()}/reservar?lang=${lang}`;
+  const m = msg;
+  const link = `${siteUrl()}/reservar`;
   const name = b.customerName ?? "";
   return toCustomer(
     b,
     "rebook_nudge",
     {
       sms: fill(m.rtSms, { weeks, service: serviceName, link }) + ` ${fill(m.optoutSms, { link: optout })}`,
-      wa: waIn(lang, "WA_TEMPLATE_RETOQUE", null, [name, serviceName, String(weeks)], []),
+      wa: waIn("WA_TEMPLATE_RETOQUE", null, [name, serviceName, String(weeks)], []),
       email: {
         subject: fill(m.rtSubject, { service: serviceName, salon: salon() }),
         html:
@@ -332,17 +319,16 @@ export async function notifyOwnerUnconfirmed(b: BookingSummary): Promise<void> {
 /* Lista de espera                                                     */
 /* ------------------------------------------------------------------ */
 
-export type WaitPerson = { id: string; name: string; phone: string; email: string | null; serviceName: string; lang?: string };
+export type WaitPerson = { id: string; name: string; phone: string; email: string | null; serviceName: string };
 
 /** Aviso a quien esperaba: se ha liberado un hueco. Devuelve true si salió por algún canal. */
 export async function notifyWaitlistSlot(w: WaitPerson, slotIso: string): Promise<boolean> {
-  const lang = langOf(w);
-  const m = T(w);
+  const m = msg;
   const link = `${siteUrl()}/hueco/${w.id}`;
-  const words = whenWords(slotIso, lang);
+  const words = whenWords(slotIso);
   return toPerson({ bookingId: null, phone: w.phone, email: w.email }, "waitlist", {
     sms: fill(m.wlSms, { service: w.serviceName, words, link }),
-    wa: waIn(lang, "WA_TEMPLATE_WAITLIST", "hueco_libre", [w.name, w.serviceName, words], [{ kind: "url", suffix: w.id }]),
+    wa: waIn("WA_TEMPLATE_WAITLIST", "hueco_libre", [w.name, w.serviceName, words], [{ kind: "url", suffix: w.id }]),
     email: {
       subject: fill(m.wlSubject, { salon: salon() }),
       html: mailShell(m.wlTitle, `<p>${esc(fill(m.wlBody, { name: w.name, service: w.serviceName, words }))}</p><p>${esc(m.wlNote)}</p>`, [{ label: m.wlButton, href: link, primary: true }]),
@@ -384,12 +370,12 @@ export async function notifyRescheduled(b: BookingSummary, oldStartsAt: string, 
   if (notifyCustomer) {
     jobs.push(
       toCustomer(b, "rescheduled", {
-        sms: fill(T(b).reSms, { when: fmtLong(b.startsAt, LOCALE[langOf(b)]), service: b.serviceName, link }),
+        sms: fill(msg.reSms, { when: fmtLong(b.startsAt), service: b.serviceName, link }),
         // se reutiliza la plantilla de confirmación con la nueva fecha
-        wa: waIn(langOf(b), "WA_TEMPLATE_CREATED", "cita_confirmada", [b.customerName ?? "", b.serviceName, fmtLong(b.startsAt, LOCALE[langOf(b)])], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
+        wa: waIn("WA_TEMPLATE_CREATED", "cita_confirmada", [b.customerName ?? "", b.serviceName, fmtLong(b.startsAt)], [{ kind: "url", suffix: `${b.code}?t=${b.token.slice(0, 12)}` }]),
         email: {
-          subject: fill(T(b).reSubject, { salon: salon() }),
-          html: mailShell(T(b).reTitle, `<p>${esc(fill(T(b).reBody, { service: b.serviceName }))}</p><p><b>${esc(fmtLong(b.startsAt, LOCALE[langOf(b)]))}</b></p>`, [{ label: T(b).reButton, href: link, primary: true }]),
+          subject: fill(msg.reSubject, { salon: salon() }),
+          html: mailShell(msg.reTitle, `<p>${esc(fill(msg.reBody, { service: b.serviceName }))}</p><p><b>${esc(fmtLong(b.startsAt))}</b></p>`, [{ label: msg.reButton, href: link, primary: true }]),
         },
       }),
     );

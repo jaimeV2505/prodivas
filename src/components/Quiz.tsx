@@ -1,11 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { getDict, type Dict, type Lang } from "@/lib/i18n";
+import { getDict, type Dict } from "@/lib/i18n";
 import { quizAddon, quizResult, quizServices, type Last, type QuizAnswers, type QuizResultId, type Style, type Time } from "@/lib/quiz";
 
 type Props = {
-  lang: Lang;
   /** Slugs de los servicios que existen. */
   catalog: string[];
   /** Slugs de los extras que existen. */
@@ -22,8 +21,8 @@ const RESULT_KEY: Record<QuizResultId, [keyof Dict, keyof Dict]> = {
 const TIP_KEY: Record<Style, keyof Dict> = { natural: "quizTipNatural", classic: "quizTipClassic", bold: "quizTipBold" };
 
 /** «¿Qué manicura eres?»: tres preguntas de un toque y una recomendación para reservar. */
-export default function Quiz({ lang, catalog, addonSlugs, onPick }: Props) {
-  const T = getDict(lang);
+export default function Quiz({ catalog, addonSlugs, onPick }: Props) {
+  const T = getDict();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(0);
   const [a, setA] = useState<Partial<QuizAnswers>>({});

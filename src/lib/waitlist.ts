@@ -20,7 +20,6 @@ export async function joinWaitlist(input: {
   phone: string;
   email?: string | null;
   source: "web" | "app";
-  lang?: string;
   ipHash: string;
 }): Promise<{ already: boolean; serviceName: string }> {
   const visit = await loadVisit(input.serviceIds); // valida que existan, estén activos y sean 1 a 4
@@ -34,9 +33,9 @@ export async function joinWaitlist(input: {
 
   try {
     await query(
-      `INSERT INTO waitlist (service_id, service_ids, day, part, name, phone, phone_key, email, source, ip_hash, lang)
-       VALUES ($1::int, $10::int[], $2::date, $3, $4, $5, $6, $7, $8, $9, $11)`,
-      [visit.items[0].id, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash, visit.items.length > 1 ? visit.items.map((i) => i.id) : null, input.lang === "gl" || input.lang === "en" ? input.lang : "es"],
+      `INSERT INTO waitlist (service_id, service_ids, day, part, name, phone, phone_key, email, source, ip_hash)
+       VALUES ($1::int, $10::int[], $2::date, $3, $4, $5, $6, $7, $8, $9)`,
+      [visit.items[0].id, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash, visit.items.length > 1 ? visit.items.map((i) => i.id) : null],
     );
     return { already: false, serviceName: visit.name };
   } catch (e) {
@@ -77,11 +76,10 @@ export async function offerWindow(startsAtIso: string, endsAtIso: string, maxPeo
     phone: string;
     email: string | null;
     part: string;
-    lang: string;
     service_id: number;
     service_ids: number[] | null;
   }>(
-    `SELECT w.id, w.name, w.phone, w.email, w.part, w.lang, w.service_id, w.service_ids
+    `SELECT w.id, w.name, w.phone, w.email, w.part, w.service_id, w.service_ids
      FROM waitlist w
      WHERE w.status = 'ACTIVE' AND (w.day = $1::date OR (w.day IS NULL AND $1::date <= $2::date + 14))
      ORDER BY w.created_at LIMIT 40`,
@@ -111,7 +109,7 @@ export async function offerWindow(startsAtIso: string, endsAtIso: string, maxPeo
       return r.available && partOk(w.part, r) && t > Date.now() + 30 * 60_000 && t < freedEnd && t + dur > freedStart;
     });
     if (!fit) continue;
-    const ok = await notifyWaitlistSlot({ id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: visit.name, lang: w.lang }, fit.startsAt);
+    const ok = await notifyWaitlistSlot({ id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: visit.name }, fit.startsAt);
     if (ok) {
       await query(`UPDATE waitlist SET status = 'NOTIFIED', notified_at = now(), notified_slot = $2::timestamptz WHERE id = $1::uuid`, [w.id, fit.startsAt]);
       notified++;

@@ -8,13 +8,12 @@ export type Trend = {
   body: string;
   topic: string;
   serviceSlug: string | null;
-  i18n?: Partial<Record<"gl" | "en", { title?: string; body?: string }>>;
 };
 
 export async function listTrends(): Promise<Trend[]> {
   try {
     return await query<Trend>(
-      `SELECT id, emoji, title, body, topic, service_slug AS "serviceSlug", i18n
+      `SELECT id, emoji, title, body, topic, service_slug AS "serviceSlug"
        FROM trends WHERE active ORDER BY sort, id LIMIT 30`,
     );
   } catch {

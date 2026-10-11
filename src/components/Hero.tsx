@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useReducedMotion } from "framer-motion";
-import { Check } from "lucide-react";
+import { ArrowRight, Check, Smartphone } from "lucide-react";
 import { HERO_PHOTO } from "@/lib/media";
 import type { Polish } from "@/lib/polish";
 import Art from "./Art";
@@ -76,9 +76,15 @@ export default function Hero({ services, today }: { services: HeroService[]; tod
             <li><Check size={16} aria-hidden="true" /> Hueco guardado mientras reservas</li>
             <li><Check size={16} aria-hidden="true" /> Aviso el mismo día, cancelas con un toque</li>
           </ul>
+          <TransitionLink href="/cita" className="easycta">
+            <span className="easycta__ico" aria-hidden="true"><Smartphone size={26} /></span>
+            <span className="easycta__txt">
+              <b>Pedir cita fácil</b>
+              <small>3 toques · sin registrarte · instálala como app</small>
+            </span>
+            <ArrowRight size={22} aria-hidden="true" className="easycta__arrow" />
+          </TransitionLink>
           <p className="hero__easy">
-            ¿Prefieres algo más sencillo? <TransitionLink href="/cita">Pedir cita en modo fácil</TransitionLink>
-            {" · "}
             <Link href="/#servicios">Ver precios</Link>
           </p>
         </div>

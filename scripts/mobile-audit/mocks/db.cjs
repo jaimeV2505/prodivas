@@ -37,7 +37,7 @@ const sumRow = (o = {}) => ({
   starts_at: d(30), ends_at: d(30.75), customer_name: "María García López", customer_phone: "600123456", customer_email: null, notes: "Color: Rosa chicle",
   service_name: "Manicura semipermanente", service_ids: [1], price_cents: 1800, deposit_cents: 0, deposit_status: "NONE", attendance: null,
   staff_id: 1, staff_name: "Pro Diva", customer_id: 7, can_cancel: true, customer_response: null, cancel_reason: null,
-  notice_hours: 24, refund_hours: 24, group_id: null, cancel_why: null, reschedule_free: false, centre_note: null, lang: "es", ...o,
+  notice_hours: 24, refund_hours: 24, group_id: null, cancel_why: null, reschedule_free: false, centre_note: null, ...o,
 });
 
 const AGENDA = [
@@ -104,11 +104,11 @@ function route(sql) {
   if (/last_cron_run/.test(s)) return [{ mins: 7 }];
   if (/MIN\(duration_min\)/.test(s)) return [{ m: 15 }];
   if (/FROM addons/.test(s)) return [
-    { id: 1, slug: "retirada-semipermanente", name: "Retirada de semipermanente", description: "Si llevas esmalte semipermanente.", durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 10, category: "Manicura y pedicura", i18n: {} },
-    { id: 2, slug: "nail-art-sencillo", name: "Nail art sencillo", description: null, durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 20, category: "Manicura y pedicura", i18n: {} }];
+    { id: 1, slug: "retirada-semipermanente", name: "Retirada de semipermanente", description: "Si llevas esmalte semipermanente.", durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 10, category: "Manicura y pedicura" },
+    { id: 2, slug: "nail-art-sencillo", name: "Nail art sencillo", description: null, durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 20, category: "Manicura y pedicura" }];
   if (/FROM packages/.test(s)) return [
-    { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, discount_percent: 10, service_slugs: ["manicura-semipermanente", "pedicura-semipermanente"], active: true, sort: 10, occasion: null, people: 1, starts_on: null, ends_on: "2026-12-31", featured: true, i18n: {} },
-    { id: 2, slug: "mirada-completa", name: "Mirada completa", emoji: "👁️", description: "Pestañas y cejas.", serviceSlugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], discountPercent: 0, discount_percent: 0, service_slugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], active: true, sort: 20, i18n: {} }];
+    { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, discount_percent: 10, service_slugs: ["manicura-semipermanente", "pedicura-semipermanente"], active: true, sort: 10, occasion: null, people: 1, starts_on: null, ends_on: "2026-12-31", featured: true },
+    { id: 2, slug: "mirada-completa", name: "Mirada completa", emoji: "👁️", description: "Pestañas y cejas.", serviceSlugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], discountPercent: 0, discount_percent: 0, service_slugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], active: true, sort: 20 }];
   if (/FROM settings WHERE key IN/.test(s)) return [{ key: "deposit_policy", value: "service" }, { key: "deposit_after_no_shows", value: "1" }, { key: "deposit_default_cents", value: "1000" }, { key: "loyalty_enabled", value: "on" }, { key: "loyalty_every", value: "10" }, { key: "loyalty_reward", value: "una manicura clásica gratis" }];
   if (/FROM trends/.test(s)) return [
     { id: 1, emoji: "🍷", title: "Burdeos con brillo glow", body: "Los tonos borgoña y burdeos mandan este otoño.", topic: "nails", serviceSlug: "manicura-semipermanente", service_slug: "manicura-semipermanente", active: true, sort: 10 },

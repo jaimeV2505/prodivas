@@ -3,14 +3,13 @@
 import { useEffect, useState } from "react";
 import { CalendarCheck } from "lucide-react";
 import { addDays } from "@/lib/dates";
-import { fill, getDict, LOCALE, localized, type Lang } from "@/lib/i18n";
+import { fill, getDict } from "@/lib/i18n";
 import { fmtLong, localParts } from "@/lib/format";
 import { saveBooking, saveVisitHistory } from "@/lib/myBookings";
 import type { Service } from "./BookingFlow";
 
 type Slot = { day: string; time: string; startsAt: string; available: boolean };
 type Props = {
-  lang: Lang;
   today: string;
   maxDate: string;
   /** Hora de la cita que se acaba de reservar: el retoque se busca a las mismas horas, N semanas después. */
@@ -30,9 +29,8 @@ const dayDiff = (a: string, b: string) => Math.round((Date.UTC(+a.slice(0, 4), +
  * Si ese hueco no está libre, ofrece los más cercanos. El cálculo usa el día y la hora LOCALES, así que
  * no se descuadra con el cambio de hora.
  */
-export default function RebookCard({ lang, today, maxDate, baseStartsAt, services, contact, acks }: Props) {
-  const T = getDict(lang);
-  const locale = LOCALE[lang];
+export default function RebookCard({ today, maxDate, baseStartsAt, services, contact, acks }: Props) {
+  const T = getDict();
   const weeks = Math.min(...services.map((s) => s.rebookWeeks ?? 99));
   const picked = services.filter((s) => s.rebookWeeks === weeks);
   const base = localParts(baseStartsAt);
@@ -84,7 +82,7 @@ export default function RebookCard({ lang, today, maxDate, baseStartsAt, service
       const r = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ holdId: hj.holdId, holdToken: hj.holdToken, name: contact.name, phone: contact.phone, email: contact.email, notes: "Retoque", acks, lang }),
+        body: JSON.stringify({ holdId: hj.holdId, holdToken: hj.holdToken, name: contact.name, phone: contact.phone, email: contact.email, notes: "Retoque", acks }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error("confirm");
@@ -106,12 +104,12 @@ export default function RebookCard({ lang, today, maxDate, baseStartsAt, service
   if (doneAt) {
     return (
       <div className="rebook rebook--ok" role="status">
-        <CalendarCheck size={20} aria-hidden="true" /> <p>{fill(T.rebookDone, { when: fmtLong(doneAt, locale) })}</p>
+        <CalendarCheck size={20} aria-hidden="true" /> <p>{fill(T.rebookDone, { when: fmtLong(doneAt) })}</p>
       </div>
     );
   }
   if (!options.length) return null;
-  const names = picked.map((s) => localized(s, lang).name).join(" + ");
+  const names = picked.map((s) => s.name).join(" + ");
   const exact = (s: Slot) => {
     const p = localParts(s.startsAt);
     return p.day === targetDay && p.minutes === base.minutes;
@@ -125,7 +123,7 @@ export default function RebookCard({ lang, today, maxDate, baseStartsAt, service
         {options.map((s) => (
           <button key={s.startsAt} type="button" className={`rebook__opt ${exact(s) ? "is-exact" : ""}`} onClick={() => void book(s)} disabled={!!busy}>
             <small>{exact(s) ? T.rebookSame : T.rebookNear}</small>
-            <strong>{busy === s.startsAt ? T.rebookWorking : fmtLong(s.startsAt, locale)}</strong>
+            <strong>{busy === s.startsAt ? T.rebookWorking : fmtLong(s.startsAt)}</strong>
           </button>
         ))}
       </div>

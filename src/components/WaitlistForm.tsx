@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { Bell, Check } from "lucide-react";
-import { getDict, type Lang } from "@/lib/i18n";
+import { getDict } from "@/lib/i18n";
 
 type Props = {
   serviceId: number;
@@ -12,12 +12,11 @@ type Props = {
   dayLabel?: string;
   source: "web" | "app";
   startOpen?: boolean;
-  lang?: Lang;
 };
 
 /** "Avísame si se libera un hueco": nombre + teléfono, sin cuenta. */
-export default function WaitlistForm({ serviceId, serviceIds, day, dayLabel, source, startOpen = false, lang = "es" }: Props) {
-  const T = getDict(lang);
+export default function WaitlistForm({ serviceId, serviceIds, day, dayLabel, source, startOpen = false }: Props) {
+  const T = getDict();
   const easy = source === "app";
   const [open, setOpen] = useState(startOpen);
   const [form, setForm] = useState({ name: "", phone: "", email: "", part: "ANY", website: "" });
@@ -32,11 +31,11 @@ export default function WaitlistForm({ serviceId, serviceIds, day, dayLabel, sou
       const r = await fetch("/api/waitlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceIds: serviceIds && serviceIds.length ? serviceIds : [serviceId], day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, lang, website: form.website }),
+        body: JSON.stringify({ serviceIds: serviceIds && serviceIds.length ? serviceIds : [serviceId], day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, website: form.website }),
       });
       const j = await r.json();
       if (!r.ok) {
-        setError(lang === "es" ? (j?.error?.message ?? T.wlFail) : T.wlFail);
+        setError(j?.error?.message ?? T.wlFail);
         setState("idle");
         return;
       }

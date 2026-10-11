@@ -1,13 +1,11 @@
 import type { Metadata } from "next";
-import { cookies, headers } from "next/headers";
 import BookingFlow, { type Staff } from "@/components/BookingFlow";
-import LangSwitch from "@/components/LangSwitch";
 import SiteHeader from "@/components/SiteHeader";
 import { loadCatalog } from "@/lib/catalog";
 import { CONFIG } from "@/lib/config";
 import { addDays, isDay, todayIn } from "@/lib/dates";
 import { query } from "@/lib/db";
-import { getDict, pickLang } from "@/lib/i18n";
+import { getDict } from "@/lib/i18n";
 import { DEPOSIT_REFUND_HOURS, stripeEnabled } from "@/lib/payments";
 import { listTrends } from "@/lib/trends";
 
@@ -17,12 +15,10 @@ export const metadata: Metadata = { title: "Reservar cita" };
 export default async function ReservarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ servicio?: string; dia?: string; hora?: string; color?: string; extra?: string; lang?: string }>;
+  searchParams: Promise<{ servicio?: string; dia?: string; hora?: string; color?: string; extra?: string }>;
 }) {
   const sp = await searchParams;
-  const [cookieStore, hdrs] = await Promise.all([cookies(), headers()]);
-  const lang = pickLang(sp.lang, cookieStore.get("pd_lang")?.value, hdrs.get("accept-language"));
-  const T = getDict(lang);
+  const T = getDict();
   const [catalog, staff, trends] = await Promise.all([
     loadCatalog(),
     query<Staff>(`SELECT id, name FROM staff WHERE active ORDER BY sort, id`),
@@ -36,14 +32,12 @@ export default async function ReservarPage({
       <main className="container flow-page">
         <div className="flow-head">
           <h1 className="flow-title">{T.pageTitle}</h1>
-          <LangSwitch lang={lang} label={T.language} />
         </div>
         <BookingFlow
           services={catalog.services}
           staff={staff}
           addons={catalog.addons}
           packs={catalog.packs}
-          lang={lang}
           depositPolicy={catalog.depositPolicy}
           trends={trends}
           initialSlug={sp.servicio}

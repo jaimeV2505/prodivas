@@ -19,11 +19,11 @@ export async function loadCatalog(): Promise<Catalog> {
          FROM services WHERE active ORDER BY sort, id`,
       ),
       query<Addon>(
-        `SELECT id, slug, name, description, duration_min AS "durationMin", price_cents AS "priceCents", category, i18n
+        `SELECT id, slug, name, description, duration_min AS "durationMin", price_cents AS "priceCents", category
          FROM addons WHERE active ORDER BY sort, id`,
       ),
       query<Pack>(
-        `SELECT id, slug, name, emoji, description, service_slugs AS "serviceSlugs", discount_percent AS "discountPercent", i18n,
+        `SELECT id, slug, name, emoji, description, service_slugs AS "serviceSlugs", discount_percent AS "discountPercent",
                 occasion, people, featured
          FROM packages
          WHERE active AND (starts_on IS NULL OR starts_on <= $1::date) AND (ends_on IS NULL OR ends_on >= $1::date)

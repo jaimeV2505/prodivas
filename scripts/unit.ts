@@ -1,7 +1,4 @@
 // Pruebas rápidas de la lógica pura (sin base de datos ni navegador):  npm run test:unit
-import { es } from "../src/lib/i18n/es";
-import { gl } from "../src/lib/i18n/gl";
-import { en } from "../src/lib/i18n/en";
 import { discounted, matchPack, suggest } from "../src/lib/combos";
 import { answer, nextTrend, pairingTip, spontaneous, type DivaCtx } from "../src/lib/diva";
 import { effectiveDeposit } from "../src/lib/deposit";
@@ -12,7 +9,7 @@ import { stampsOf } from "../src/lib/loyalty";
 import { colorFromNotes, dueRetouch, lastColor } from "../src/lib/recs";
 import { quizAddon, quizResult, quizServices } from "../src/lib/quiz";
 import { inWindow, isQuiet } from "../src/lib/quiet";
-import { msgDict, msgEs, msgGl, msgEn } from "../src/lib/i18n/msg";
+import { msgEs } from "../src/lib/i18n/msg";
 import { optoutToken, parseOptoutToken } from "../src/lib/optout";
 
 let fails = 0;
@@ -22,13 +19,6 @@ const check = (ok: boolean, msg: string, extra = "") => {
   if (!ok) fails++;
   console.log(`${ok ? "✔" : "✘"} ${msg}${!ok && extra ? "  →  " + extra : ""}`);
 };
-
-/* ---- idiomas: mismas claves y mismos huecos {x} en castellano, gallego e inglés ---- */
-const ph = (t: string) => (t.match(/\{\w+\}/g) ?? []).sort().join(",");
-const keys = Object.keys(es) as (keyof typeof es)[];
-check(keys.every((k) => k in gl && k in en), `los tres idiomas tienen las ${keys.length} mismas claves`);
-check(keys.every((k) => ph(es[k]) === ph((gl as Record<string, string>)[k]) && ph(es[k]) === ph((en as Record<string, string>)[k])), "los huecos {nombre} coinciden en los tres idiomas", keys.filter((k) => ph(es[k]) !== ph((gl as Record<string, string>)[k]) || ph(es[k]) !== ph((en as Record<string, string>)[k])).join(", "));
-check(keys.every((k) => (gl as Record<string, string>)[k].trim() !== "" && (en as Record<string, string>)[k].trim() !== ""), "no hay textos vacíos");
 
 /* ---- packs y sugerencias ---- */
 const catalog = ["manicura-semipermanente", "manicura-clasica", "pedicura", "pedicura-semipermanente", "lifting-pestanas", "tinte-cejas", "hilo-cejas", "microblading"];
@@ -47,18 +37,16 @@ check(suggest({ have: [], catalog, packs, maxServices: 6 }).length === 0, "sin s
 
 /* ---- Diva: entiende castellano, gallego e inglés y contesta en el mismo idioma ---- */
 const services = catalog.map((slug, i) => ({ slug, name: slug.replace(/-/g, " "), category: i < 4 ? "Manicura y pedicura" : "Mirada", durationMin: 30 + i * 5, priceCents: 1000 + i * 300 }));
-const trends = [{ id: 1, emoji: "🍷", title: "Burdeos", body: "El burdeos manda.", topic: "nails", serviceSlug: "manicura-semipermanente", i18n: { en: { title: "Burgundy", body: "Burgundy rules." } } }];
-const ctxOf = (lang: "es" | "gl" | "en", selected: string[] = []): DivaCtx => ({ lang, trends, services, packs: packs.map((p) => ({ ...p, name: p.slug })), selected, step: "time", address: "Rúa Rambla San Pablo, 6, Melide" });
+const trends = [{ id: 1, emoji: "🍷", title: "Burdeos", body: "El burdeos manda.", topic: "nails", serviceSlug: "manicura-semipermanente" }];
+const ctxOf = (selected: string[] = []): DivaCtx => ({ trends, services, packs: packs.map((p) => ({ ...p, name: p.slug })), selected, step: "time", address: "Rúa Rambla San Pablo, 6, Melide" });
 const rot = {};
-check(answer("hay packs?", ctxOf("es"), rot).text.includes("manos-y-pies"), "Diva responde sobre packs (castellano)");
-check(/pack/i.test(answer("do you have any offers?", ctxOf("en"), rot).text), "Diva entiende «offers» en inglés");
-check(/prezo|custa|€/i.test(answer("canto custa?", ctxOf("gl"), rot).text), "Diva entiende «canto custa» en gallego");
-check(answer("what's trending?", ctxOf("en"), rot).text.includes("Burgundy"), "la tendencia sale traducida cuando existe traducción");
-check(answer("que se lleva", ctxOf("es"), rot).text.includes("Burdeos"), "y en castellano sale la original");
-check(answer("how much is the lifting?", ctxOf("en"), rot).text.includes("lifting pestanas"), "pregunta por un servicio concreto (precio)");
-check(!!pairingTip(ctxOf("es", ["manicura-semipermanente"]))?.action, "Diva sugiere con un botón lo que combina con lo elegido");
-check(spontaneous(ctxOf("gl"), {}).text.length > 10 && nextTrend(ctxOf("es"), {}, "lashes").text.length > 5, "Diva habla sola y sabe decir cuándo no hay tendencias de un tema");
-check(answer("qwertyuiop", ctxOf("en"), rot).text.includes("670 424 348"), "si no entiende, ofrece el teléfono");
+check(answer("hay packs?", ctxOf(), rot).text.includes("manos-y-pies"), "Diva responde sobre packs (castellano)");
+check(/precio|€/i.test(answer("¿cuánto cuesta?", ctxOf(), rot).text), "Diva contesta a «¿cuánto cuesta?»");
+check(answer("¿qué se lleva?", ctxOf(), rot).text.includes("Burdeos"), "Diva cuenta la tendencia que escribió la dueña");
+check(answer("¿cuánto cuesta el lifting?", ctxOf(), rot).text.includes("lifting pestanas"), "pregunta por un servicio concreto (precio)");
+check(!!pairingTip(ctxOf(["manicura-semipermanente"]))?.action, "Diva sugiere con un botón lo que combina con lo elegido");
+check(spontaneous(ctxOf(), {}).text.length > 10 && nextTrend(ctxOf(), {}, "lashes").text.length > 5, "Diva habla sola y sabe decir cuándo no hay tendencias de un tema");
+check(answer("qwertyuiop", ctxOf(), rot).text.includes("670 424 348"), "si no entiende, ofrece el teléfono");
 
 /* ---- «como siempre»: día y hora habituales (hora local de Madrid, también con el cambio de hora) ---- */
 const lp = localParts("2026-10-22T14:45:00Z"); // 16:45 en Madrid (verano)
@@ -69,7 +57,7 @@ const hist = [{ startsAt: "2026-09-10T15:00:00Z", slugs: [] }, { startsAt: "2026
 const u = usualOf(hist);
 check(u?.dow === 4 && u.minutes >= 17 * 60 - 5 && u.minutes <= 17 * 60 + 20, "el día habitual es el más repetido y la hora la mediana", JSON.stringify(u));
 check(usualOf([]) === null, "sin historial no hay «como siempre»");
-check(weekdayName(4, "es-ES") === "jueves" && weekdayName(4, "en-GB") === "Thursday", "nombre del día en cada idioma");
+check(weekdayName(4, "es-ES") === "jueves" && weekdayName(0, "es-ES") === "domingo", "nombre del día de la semana");
 
 async function main() {
 /* ---- fase 3: packs para dos, sellos, toca retoque, test ---- */
@@ -105,14 +93,11 @@ async function main() {
   check(quizServices("full", ["manicura-clasica"]).join() === "manicura-clasica" && quizServices("pair", catalog).length === 2, "test: si falta un servicio se omite; si no queda ninguno, el primero del catálogo");
 }
 
-/* ---- mensajes a la clienta: mismos textos y mismos huecos en los tres idiomas ---- */
+/* ---- mensajes a la clienta ---- */
 {
   const k = Object.keys(msgEs) as (keyof typeof msgEs)[];
-  const ph2 = (t: string) => (t.match(/\{\w+\}/g) ?? []).sort().join(",");
-  check(k.every((x) => x in msgGl && x in msgEn), `los mensajes tienen las ${k.length} mismas claves en castellano, gallego e inglés`);
-  check(k.every((x) => ph2(msgEs[x]) === ph2((msgGl as Record<string, string>)[x]) && ph2(msgEs[x]) === ph2((msgEn as Record<string, string>)[x])), "los huecos {x} de los mensajes coinciden en los tres idiomas", k.filter((x) => ph2(msgEs[x]) !== ph2((msgEn as Record<string, string>)[x]) || ph2(msgEs[x]) !== ph2((msgGl as Record<string, string>)[x])).join(", "));
-  check(msgDict("gl").remSms !== msgDict("es").remSms && msgDict("en").remSms !== msgDict("es").remSms, "el recordatorio sale distinto en cada idioma");
-  check(k.filter((x) => x.endsWith("Sms")).every((x) => !/[áéíóúñ¿¡€]/i.test(msgEs[x])), "los SMS en castellano van sin tildes (un segmento más barato)", k.filter((x) => x.endsWith("Sms") && /[áéíóúñ¿¡€]/i.test(msgEs[x])).join(", "));
+  check(k.filter((x) => x.endsWith("Sms")).every((x) => !/[áéíóúñ¿¡€]/i.test(msgEs[x])), "los SMS van sin tildes (un segmento más barato)", k.filter((x) => x.endsWith("Sms") && /[áéíóúñ¿¡€]/i.test(msgEs[x])).join(", "));
+  check(k.every((x) => msgEs[x].trim() !== ""), "no hay mensajes vacíos");
 }
 
 /* ---- horas de silencio ---- */

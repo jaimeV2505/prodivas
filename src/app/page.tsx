@@ -199,7 +199,10 @@ export default async function Home() {
                   </div>
                 ))}
               </dl>
-              <TransitionLink href="/reservar" className="btn btn--primary btn--lg">Reservar cita</TransitionLink>
+              <div className="where__cta">
+                <TransitionLink href="/cita" className="btn btn--primary btn--lg">Pedir cita fácil</TransitionLink>
+                <TransitionLink href="/reservar" className="btn btn--ghost btn--lg">Reserva completa</TransitionLink>
+              </div>
             </div>
           </div>
         </section>
@@ -208,7 +211,7 @@ export default async function Home() {
         <div className="footer__word" aria-hidden="true">Pro Diva</div>
         <div className="container footer__in">
           <p>© {new Date().getFullYear()} Pro Diva. Centro de estética y tienda de peluquería en Melide.</p>
-          <Link href="/reservar">Reservar cita</Link>
+          <span><Link href="/cita">Pedir cita fácil</Link> · <Link href="/reservar">Reserva completa</Link></span>
         </div>
       </footer>
       <MobileCta whatsapp={salon.whatsapp} />

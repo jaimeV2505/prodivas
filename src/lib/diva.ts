@@ -1,17 +1,16 @@
 import { PAIR_RULES, suggest } from "./combos";
 import { fmtDuration, fmtPrice } from "./format";
-import { fill, getDict, MONEY_LOCALE, type Dict, type Lang } from "./i18n";
+import { fill, getDict, type Dict } from "./i18n";
 import type { Trend } from "./trends";
 
 /**
  * El «cerebro» de Diva, la chica del avatar. No usa inteligencia artificial ni servicios externos:
  * responde con reglas sencillas y con los datos reales del salón (servicios, precios, duraciones, packs) y las
- * tendencias que la dueña edita en /admin/ajustes. Entiende castellano, gallego e inglés y contesta en el
- * idioma de la clienta. Si no entiende algo, lo dice y ofrece el teléfono.
+ * tendencias que la dueña edita en /admin/ajustes. Si no entiende algo, lo dice y ofrece el teléfono.
  */
 export type DivaService = { slug: string; name: string; category: string; durationMin: number; priceCents: number };
 export type DivaPack = { slug: string; name: string; serviceSlugs: string[]; discountPercent: number; people?: number };
-export type DivaCtx = { lang: Lang; trends: Trend[]; services: DivaService[]; packs: DivaPack[]; selected: string[]; step: string; address: string };
+export type DivaCtx = { trends: Trend[]; services: DivaService[]; packs: DivaPack[]; selected: string[]; step: string; address: string };
 export type DivaAction = { label: string; slug: string; kind: "service" | "pack" };
 export type DivaMsg = { text: string; action?: DivaAction };
 /** Contadores para ir rotando tendencias y consejos sin repetir siempre lo mismo. */
@@ -19,10 +18,10 @@ export type Rot = Record<string, number>;
 
 const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const PHONE = "670 424 348";
-const T = (c: DivaCtx): Dict => getDict(c.lang);
+const T = (_c?: DivaCtx): Dict => getDict();
 
-export const quickChips = (lang: Lang): { label: string; q: string }[] => {
-  const d = getDict(lang);
+export const quickChips = (): { label: string; q: string }[] => {
+  const d = getDict();
   return [
     { label: d.divaChipTrend, q: d.divaChipTrendQ },
     { label: d.divaChipRec, q: d.divaChipRecQ },
@@ -41,10 +40,9 @@ function offerService(ctx: DivaCtx, slug: string | null | undefined): DivaAction
   return { label: fill(first ? T(ctx).divaOfferChoose : T(ctx).divaOfferAdd, { name: s.name }), slug, kind: "service" };
 }
 
-/** Tendencia con su texto en el idioma de la clienta (si la dueña ha traducido la tendencia; si no, en castellano). */
+/** Tendencia con su emoji, su título y su texto. */
 export function trendMessage(tr: Trend, ctx: DivaCtx): DivaMsg {
-  const loc = ctx.lang === "es" ? undefined : tr.i18n?.[ctx.lang];
-  return { text: `${tr.emoji} ${loc?.title ?? tr.title}: ${loc?.body ?? tr.body}`, action: offerService(ctx, tr.serviceSlug) };
+  return { text: `${tr.emoji} ${tr.title}: ${tr.body}`, action: offerService(ctx, tr.serviceSlug) };
 }
 
 /** Siguiente tendencia (de un tema, o de cualquiera), rotando. */
@@ -95,7 +93,7 @@ function durationAnswer(ctx: DivaCtx, named: DivaService[] = []): DivaMsg {
 
 function priceAnswer(ctx: DivaCtx, named: DivaService[] = []): DivaMsg {
   const d = T(ctx);
-  const money = (c: number) => fmtPrice(c, MONEY_LOCALE[ctx.lang]);
+  const money = (c: number) => fmtPrice(c);
   if (named.length) return { text: `${named.map((s) => `${s.name}: ${money(s.priceCents)}`).join(" · ")} 💶` };
   const sel = ctx.services.filter((s) => ctx.selected.includes(s.slug));
   if (sel.length) {
@@ -118,27 +116,27 @@ export function recommend(ctx: DivaCtx, rot: Rot): DivaMsg {
   return { text: T(ctx).divaRecNone };
 }
 
-// Palabras clave en castellano, gallego e inglés (sin acentos): se entiende a la clienta en cualquiera de los tres
+// Palabras clave (sin acentos) con las que Diva entiende lo que le escribe la clienta
 const RX = {
-  hello: /^(hola|ola|buenas|buenos|hey|ey|que tal|hello|hi\b|good (morning|afternoon|evening))/,
-  thanks: /gracias|grazas|thanks|thank you|genial|perfecto|guay|estupendo|great|^vale\b|^ok\b/,
-  price: /precio|prezo|cuesta|custa|cuanto vale|canto vale|tarifa|cuanto es\b|canto e\b|euros|coste|how much|price|cost|cuanto cobr|canto cobr/,
-  duration: /cuanto dura|canto dura|duracion|cuanto tarda|canto tarda|cuanto tiempo|canto tempo|how long|duration|\bdura\b|takes/,
-  several: /varios|varias|juntos|a la vez|seguid|separad|distint|diferent|otro dia|outro dia|otra hora|outra hora|por separado|several|together|separate|different day|back to back/,
-  packs: /\bpacks?\b|paquete|oferta|descuento|promo|combo|desconto|discount|deal|offer/,
-  extras: /\bextras?\b|retirada|nail art|parafina|add-?on|removal/,
-  companion: /acompan|amiga|madre|\bnai\b|friend|\bmum\b|\bmom\b|con alguien|con alguen|with someone|venimos|vengo con|vimos|vamos dous|come with/,
-  trends: /tendenc|moda|se lleva|se leva|de moda|novedad|ultimo|lo nuevo|nuevo|\bnovo\b|trend|trending|que hay|what.?s new|fashion|latest/,
-  recommend: /recomien|recomend|sugier|aconsej|que me hago|que me pongo|que elijo|no se que|advise|suggest|what should i/,
-  nails: /\bunas\b|unllas|manicur|esmalte|color|colour|pedicur|nail|polish/,
-  lashes: /pesta|lifting|mirada|lash|eyelash/,
-  brows: /ceja|cella|laminad|microblad|brow/,
-  wax: /depil|laser|\bcera\b|hilo|\bfio\b|thread|wax|hair removal/,
-  where: /donde|onde\b|direccion|ubicaci|llegar|chegar|como llego|melide|address|where|location|find you/,
-  cancel: /cancel|cambiar|mover|anular|change|move|reschedule/,
-  help: /ayuda|axuda|como funciona|como reserv|como va|help|how does|how do i/,
-  book: /cita|reserv|hueco|\boco\b|hoy|hoxe|manana|libre|disponib|book|appointment|available|today|tomorrow|slot/,
-  hours: /horario|abris|abre|cierra|hora de|opening|\bopen\b|hours|aberto/,
+  hello: /^(hola|buenas|buenos|hey|ey|que tal)/,
+  thanks: /gracias|genial|perfecto|guay|estupendo|^vale\b|^ok\b/,
+  price: /precio|cuesta|cuanto vale|tarifa|cuanto es\b|euros|coste|cuanto cobr/,
+  duration: /cuanto dura|duracion|cuanto tarda|cuanto tiempo|\bdura\b/,
+  several: /varios|varias|juntos|a la vez|seguid|separad|distint|diferent|otro dia|otra hora|por separado/,
+  packs: /\bpacks?\b|paquete|oferta|descuento|promo|combo/,
+  extras: /\bextras?\b|retirada|nail art|parafina/,
+  companion: /acompan|amiga|madre|con alguien|venimos|vengo con/,
+  trends: /tendenc|moda|se lleva|de moda|novedad|ultimo|lo nuevo|nuevo|que hay/,
+  recommend: /recomien|sugier|aconsej|que me hago|que me pongo|que elijo|no se que/,
+  nails: /\bunas\b|manicur|esmalte|color|pedicur/,
+  lashes: /pesta|lifting|mirada/,
+  brows: /ceja|laminad|microblad/,
+  wax: /depil|laser|\bcera\b|hilo/,
+  where: /donde|direccion|ubicaci|llegar|como llego|melide/,
+  cancel: /cancel|cambiar|mover|anular/,
+  help: /ayuda|como funciona|como reserv|como va/,
+  book: /cita|reserv|hueco|hoy|manana|libre|disponib/,
+  hours: /horario|abris|abre|cierra|hora de/,
 };
 
 /** Contesta a lo que escribe la clienta. */
@@ -169,8 +167,8 @@ export function answer(raw: string, ctx: DivaCtx, rot: Rot): DivaMsg {
   if (has(RX.lashes)) return nextTrend(ctx, rot, "lashes");
   if (has(RX.brows)) return nextTrend(ctx, rot, "brows");
   if (has(RX.wax)) {
-    const w = ctx.services.filter((s) => /depil|hair removal|hair-removal/.test(norm(s.category)));
-    const money = (c: number) => fmtPrice(c, MONEY_LOCALE[ctx.lang]);
+    const w = ctx.services.filter((s) => /depil/.test(norm(s.category)));
+    const money = (c: number) => fmtPrice(c);
     return w.length ? { text: fill(d.divaWaxList, { list: w.map((s) => `${s.name} (${money(s.priceCents)}, ${fmtDuration(s.durationMin)})`).join(", ") }) } : { text: fill(d.divaWaxPhone, { phone: PHONE }) };
   }
   if (has(RX.where)) return { text: fill(d.divaWhere, { address: ctx.address }) };

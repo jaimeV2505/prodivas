@@ -1091,10 +1091,6 @@ a, button, summary, label, input, select, textarea, [role="button"], [role="radi
    ===================================================================== */
 .flow-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
 .flow-head .flow-title { margin: 0; }
-.lang { display: inline-flex; padding: 4px; gap: 2px; border-radius: var(--r-pill); background: var(--white); border: 2px solid var(--diva-soft); }
-.lang__btn { min-height: 44px; padding: 0 14px; border: 0; border-radius: var(--r-pill); background: transparent; color: var(--plum); font-weight: 700; font-size: 0.88rem; cursor: pointer; transition: background 0.18s, color 0.18s; }
-.lang__btn.is-on { background: var(--magenta); color: #fff; }
-@media (max-width: 380px) { .lang__btn { padding: 0 10px; font-size: 0.82rem; } }
 
 /* packs ya organizados */
 .packs { margin: 6px 0 22px; display: grid; gap: 8px; }
@@ -1264,3 +1260,55 @@ a, button, summary, label, input, select, textarea, [role="button"], [role="radi
 .loyalty__dots { display: flex; flex-wrap: wrap; gap: 6px; }
 .loyalty__dot { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; border: 2px dashed #d9a400; color: #fff; font-size: 0.95rem; }
 .loyalty__dot.is-on { background: #f2a900; border-style: solid; border-color: #f2a900; }
+
+/* instalar la app (modo fácil): una franja discreta arriba */
+.installbar { max-width: 640px; margin: 10px auto 0; padding: 10px 14px; border-radius: var(--r-md); background: var(--white); border: 2px solid var(--diva); display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; box-shadow: 0 10px 24px -18px rgba(176, 32, 106, 0.8); }
+.installbar__row { display: flex; align-items: center; gap: 10px; }
+.installbar__ico { font-size: 1.6rem; line-height: 1; }
+.installbar__txt { display: grid; flex: 1; min-width: 0; line-height: 1.2; }
+.installbar__txt strong { font-size: 1rem; }
+.installbar__txt small { color: var(--plum-70); font-size: 0.85rem; }
+.installbar__btn { display: inline-flex; align-items: center; gap: 6px; min-height: 48px; padding: 0 16px; border: 0; border-radius: var(--r-pill); background: var(--magenta); color: #fff; font-weight: 800; font-size: 1rem; cursor: pointer; flex: none; }
+.installbar__x { flex: none; width: 48px; height: 48px; display: grid; place-items: center; border: 0; background: none; color: var(--plum-70); cursor: pointer; border-radius: 50%; }
+.installbar__steps { margin: 0; padding: 10px 12px; border-radius: var(--r-sm); background: var(--blush-2); font-size: 1rem; line-height: 1.45; }
+.installbar__inline { vertical-align: -3px; color: var(--magenta); }
+@media (max-width: 360px) {
+  .installbar { margin-inline: 12px; padding: 8px 8px; }
+  .installbar__row { gap: 6px; }
+  .installbar__txt small { display: none; }
+  .installbar__txt strong { font-size: 0.95rem; }
+  .installbar__btn { padding: 0 12px; font-size: 0.95rem; }
+  .installbar__x { width: 44px; height: 44px; }
+}
+
+/* modo fácil: atajos «Packs listos» y «Haz el test» (discretos, plegados en dos botones) */
+.easy__quick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0 0 14px; }
+.easy__quickbtn { display: grid; gap: 2px; align-content: center; min-height: 76px; padding: 10px 12px; border-radius: var(--r-md); border: 2px dashed var(--diva); background: var(--white); color: var(--magenta); text-align: left; cursor: pointer; font: inherit; }
+.easy__quickbtn b { font-size: 1.05rem; line-height: 1.15; }
+.easy__quickbtn small { color: var(--plum-70); font-size: 0.82rem; line-height: 1.25; font-weight: 600; }
+.easy__quickbtn:active { transform: scale(0.98); }
+.easy__quick:has(> :only-child) { grid-template-columns: 1fr; }
+@media (max-width: 340px) { .easy__quick { grid-template-columns: 1fr; } }
+.easy__price small { display: block; text-align: right; color: var(--magenta); font-weight: 700; font-size: 0.85rem; }
+
+/* el gancho: «Pedir cita fácil» bien visible en la portada */
+.easycta { display: flex; align-items: center; gap: 14px; width: fit-content; max-width: 100%; margin-top: 16px; padding: 10px 18px 10px 10px; min-height: 68px; border-radius: var(--r-pill); background: var(--white); border: 2px solid var(--magenta); color: var(--plum); text-decoration: none; box-shadow: 0 16px 32px -18px rgba(176, 32, 106, 0.8); transition: transform 160ms var(--ease-out), box-shadow 160ms ease; }
+@media (hover: hover) { .easycta:hover { transform: translateY(-2px); box-shadow: 0 20px 36px -16px rgba(176, 32, 106, 0.9); } }
+.easycta:active { transform: scale(0.98); }
+.easycta__ico { flex: none; width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; background: var(--magenta); color: #fff; }
+.easycta__txt { display: grid; gap: 1px; min-width: 0; line-height: 1.2; }
+.easycta__txt b { font-size: 1.15rem; }
+.easycta__txt small { color: var(--plum-70); font-size: 0.85rem; font-weight: 600; }
+.easycta__arrow { flex: none; color: var(--magenta); }
+@media (prefers-reduced-motion: no-preference) { .easycta__ico { animation: easycta-pulse 2.8s ease-in-out infinite; } }
+@keyframes easycta-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(176, 32, 106, 0.45); } 60% { box-shadow: 0 0 0 12px rgba(176, 32, 106, 0); } }
+@media (max-width: 400px) { .easycta { gap: 10px; padding-right: 14px; } .easycta__txt small { font-size: 0.8rem; } }
+.where__cta { display: flex; flex-wrap: wrap; gap: 10px; }
+.site-nav__easy { white-space: nowrap; }
+@media (max-width: 640px) {
+  .site-nav__full { display: none; }
+  .site-nav__easy { background: var(--magenta); border-color: var(--magenta); color: #fff; }
+}
+.mcta__main { gap: 8px; }
+
+@media (max-width: 420px) { .installbar__txt small { display: none; } }

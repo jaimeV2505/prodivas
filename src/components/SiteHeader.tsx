@@ -27,7 +27,8 @@ export default function SiteHeader() {
         <nav aria-label="Principal" className="site-nav">
           <Link href="/#servicios" className="site-nav__link">Servicios</Link>
           <Link href="/#donde" className="site-nav__link">Dónde estamos</Link>
-          <TransitionLink href="/reservar" className="btn btn--primary btn--sm">Reservar cita</TransitionLink>
+          <TransitionLink href="/cita" className="btn btn--ghost btn--sm site-nav__easy">Cita fácil</TransitionLink>
+          <TransitionLink href="/reservar" className="btn btn--primary btn--sm site-nav__full">Reservar cita</TransitionLink>
         </nav>
       </div>
     </header>

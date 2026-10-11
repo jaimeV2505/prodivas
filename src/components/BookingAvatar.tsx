@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { answer, nextTrend, quickChips, spontaneous, type DivaAction, type DivaCtx, type DivaMsg, type Rot } from "@/lib/diva";
-import { fill, getDict, type Lang } from "@/lib/i18n";
+import { fill, getDict } from "@/lib/i18n";
 import type { Trend } from "@/lib/trends";
 
 /**
@@ -17,7 +17,6 @@ type Line = { from: "you" | "diva"; text: string; action?: DivaAction; used?: bo
 
 type Props = {
   state: AvatarState;
-  lang: Lang;
   trends: Trend[];
   services: { slug: string; name: string; category: string; durationMin: number; priceCents: number }[];
   packs: { slug: string; name: string; serviceSlugs: string[]; discountPercent: number; people?: number }[];
@@ -32,8 +31,8 @@ type Props = {
 const IDLE_MS = 24000; // cada cuánto habla sola
 const MAX_SPONTANEOUS = 6; // y cuántas veces seguidas sin que le contesten
 
-export default function BookingAvatar({ state, lang, trends, services, packs, selected, step, address, history, onAdd }: Props) {
-  const T = getDict(lang);
+export default function BookingAvatar({ state, trends, services, packs, selected, step, address, history, onAdd }: Props) {
+  const T = getDict();
   const STATE_MSG: Record<AvatarState, string> = { browse: T.divaStateBrowse, held: T.divaStateHeld, typing: T.divaStateTyping, done: T.divaStateDone };
   const ADDED: Record<Result, string> = { added: T.divaAdded, chosen: T.divaChosen, already: T.divaAlready, full: T.divaFull, missing: T.divaMissing };
   const [log, setLog] = useState<Line[]>([{ from: "diva", text: T.divaStateBrowse }]);
@@ -47,8 +46,8 @@ export default function BookingAvatar({ state, lang, trends, services, packs, se
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // El contexto cambia a cada paso: se lee siempre el último desde una referencia
-  const ctxRef = useRef<DivaCtx>({ lang, trends, services, packs, selected, step, address });
-  ctxRef.current = { lang, trends, services, packs, selected, step, address };
+  const ctxRef = useRef<DivaCtx>({ trends, services, packs, selected, step, address });
+  ctxRef.current = { trends, services, packs, selected, step, address };
 
   const later = (fn: () => void, ms: number) => {
     const t = setTimeout(fn, ms);
@@ -178,7 +177,7 @@ export default function BookingAvatar({ state, lang, trends, services, packs, se
 
       <div className="avatar__ask">
         <div className="avatar__chips">
-          {quickChips(lang).map((c) => (
+          {quickChips().map((c) => (
             <button key={c.label} type="button" className="avatar__chip" onClick={() => ask(c.q)} disabled={thinking}>
               {c.label}
             </button>

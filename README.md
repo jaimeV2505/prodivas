@@ -118,7 +118,7 @@ Las fotos están en `public/images/` y se registran en `src/lib/media.ts`:
 
 Configuración de cuentas (Telegram, Twilio, Resend, Meta, Stripe, GitHub): **`docs/SETUP.md`**.
 
-## Reserva completa: packs, extras, acompañante, atajos, retoque, idiomas y señal inteligente
+## Reserva completa: packs, extras, acompañante, atajos, retoque y señal inteligente
 
 Todo se gestiona en `/admin/ajustes` (no hace falta tocar código):
 
@@ -129,10 +129,9 @@ Todo se gestiona en `/admin/ajustes` (no hace falta tocar código):
 - **Retoque automático:** cada servicio puede llevar «retoque (semanas)». Al confirmar, se propone el mismo día de la semana y hora N semanas después (calculado en hora local: no se descuadra con el cambio de hora) y se reserva con un toque; si no hay hueco, ofrece los más cercanos.
 - **Señal inteligente:** «Según el servicio» (como siempre) o «Solo a quien ya ha faltado» (con N plantones y un importe por defecto si el servicio no lleva señal; los servicios marcados «Señal siempre» la piden a todas). A la clienta nunca se le enseña su historial: solo se le avisa de que, si ha faltado antes, se le pedirá una señal. Solo actúa con Stripe activo.
 - **Casillas de seguridad (láser, microblading):** el servicio lleva «casillas de seguridad» y la reserva (también el modo fácil) no se confirma sin marcarlas. **Solo se guarda que las marcó y cuándo, nunca datos de salud.** Los textos están en `src/lib/i18n/es.ts` (`laser1…`, `microblading1…`): **revísalos con tu gestor.**
-- **Idiomas:** castellano, gallego e inglés en toda la reserva (selector arriba a la derecha; la reserva en curso no se pierde al cambiar). Los servicios de ejemplo, los extras, los packs y las tendencias de ejemplo vienen traducidos; lo que añadas tú se muestra en castellano hasta que lo traduzcas (servicios: `src/lib/i18n/services.ts`; extras, packs y tendencias: columna `i18n`). **El gallego y el inglés conviene que los revise una persona nativa.** No cubren la portada, el modo fácil ni el panel.
 - **Migración:** esta versión usa columnas y tablas nuevas. En Vercel (`vercel-build`) y en Docker se aplica sola al desplegar; si lo haces a mano, `npm run db:migrate`. Sin la migración, reservar fallaría (la pantalla de reservar tiene un respaldo, pero no el motor).
 
-Pruebas: `npm run test:unit` (71 pruebas de la lógica: idiomas, mensajes, horas de silencio, baja firmada, packs, Diva, «como siempre», señal inteligente, alternativas de cancelación; no necesita base de datos) · `npm run audit:mobile` (navegador: 19 pantallas y 118 comprobaciones; falla si alguna pantalla tiene avisos) · `npm run test:e2e` (con base de datos real: extras, pack con descuento, casillas, tope de citas, cancelaciones, notificaciones, packs para dos, añadir servicios, grupos…; **sin ejecutar desde aquí**).
+Pruebas: `npm run test:unit` (pruebas de la lógica: mensajes, horas de silencio, baja firmada, packs, Diva, «como siempre», señal inteligente, alternativas de cancelación; no necesita base de datos) · `npm run audit:mobile` (navegador: 19 pantallas y 118 comprobaciones; falla si alguna pantalla tiene avisos) · `npm run test:e2e` (con base de datos real: extras, pack con descuento, casillas, tope de citas, cancelaciones, notificaciones, packs para dos, añadir servicios, grupos…; **sin ejecutar desde aquí**).
 
 ## Cancelaciones
 
@@ -142,11 +141,11 @@ Pruebas: `npm run test:unit` (71 pruebas de la lógica: idiomas, mensajes, horas
 - **Plazo por servicio:** en Ajustes, «Cancelar con (horas)» en cada servicio (vacío = la regla general, `CANCEL_NOTICE_HOURS`). Mismo plazo para la devolución de la señal. Láser y microblading arrancan en 48 h (solo la primera vez que se migra; luego lo cambias tú).
 - **Cancelar todas** las citas que quedan de una visita en horas distintas, con un botón.
 - **Cerrar el día** (agenda → «🚨 Cerrar este día»): bloquea el día entero y deja sus citas «por mover». A cada clienta le llega un mensaje (SMS y email; WhatsApp si defines `WA_TEMPLATE_CLOSED`) con un enlace donde elige otra hora —con 3 propuestas— o cancela **sin coste** (si pagó señal, se le devuelve). Esas citas pueden cambiarse sin plazo. Las que no contesten salen en la agenda como «Por mover» para llamarlas.
-- Pendiente (fase siguiente): cancelar solo a la acompañante (acortar el bloque).
+- Pendiente: cancelar solo a la acompañante (acortar el bloque).
 
 ## Notificaciones
 
-- **En el idioma de la clienta:** cada cita guarda el idioma con el que reservó (castellano, gallego o inglés) y todos los mensajes —confirmación, recordatorios, cambios, cancelaciones, lista de espera, después de la visita y las respuestas de WhatsApp— salen en ese idioma por SMS y email. **Por WhatsApp** en castellano se usan tus plantillas de siempre; en gallego e inglés solo si has aprobado en Meta la plantilla de ese idioma y la configuras con `WA_TEMPLATE_<TIPO>_GL` / `_EN` (por ejemplo `WA_TEMPLATE_REMINDER_EN`); si no, ese mensaje sale por SMS y email. El código de idioma que se manda a Meta es `gl` / `en` (se puede cambiar con `WA_LANG_GL` / `WA_LANG_EN`; **comprueba en Meta que tu cuenta admite gallego**). Los avisos a la dueña siguen en castellano e indican el idioma de la clienta.
+- **Todo en castellano:** confirmación, recordatorios, cambios, cancelaciones, lista de espera, después de la visita y respuestas de WhatsApp. Por WhatsApp se usan tus plantillas aprobadas en Meta (`WA_TEMPLATE_*`); si falta alguna, ese mensaje sale por SMS y email.
 - **Recordatorio en dos pasos:** (1) la **víspera a las 19:00** (`REMINDER_EVENING_HOUR`) —«mañana a las 10:00, ¿vienes?» con un toque—, solo si reservó antes de esa hora y aún no confirmó; (2) unas horas antes (`REMINDER_HOURS_BEFORE`), **solo a quien no confirmó** y con el texto «seguimos sin saber si vienes» si la víspera no contestó; (3) una hora después, si sigue sin responder, **aviso a la dueña** para que la llame. Al cambiar la hora o ceder la cita, el ciclo vuelve a empezar.
 - **Horas de silencio:** no se envían recordatorios entre `QUIET_START` y `QUIET_END` (22:00–08:00 por defecto; hora del salón). Los mensajes opcionales solo salen de `OPTIONAL_FROM` a `OPTIONAL_TO` (10:00–20:00).
 - **Después de la visita** (cuando la dueña marca «Vino»), 2 h después de acabar: **gracias + cuidados posteriores + «¿qué tal ha ido?»**. Los cuidados se escriben por servicio en Ajustes («Cuidados posteriores»; los de ejemplo **revísalos tú**, sobre todo los de láser y microblading). La valoración es **privada primero**: 1–3 estrellas piden qué mejorar (solo lo lee la dueña, que recibe un aviso al momento y puede llamar); 4–5 invitan a dejarla en Google (`GOOGLE_REVIEW_URL`). Todo se ve en `/admin/valoraciones` («Opiniones»).
@@ -161,9 +160,19 @@ Pruebas: `npm run test:unit` (71 pruebas de la lógica: idiomas, mensajes, horas
 - **Packs** (Ajustes → Packs): además de nombre, servicios y descuento, ahora tienen **ocasión** (etiqueta: «Boda», «Camino»…), **personas** (1 o **2 = «para dos»**: los servicios se hacen dos veces, para ella y su acompañante, que se apunta con su nombre), **temporada** (desde / hasta: fuera de fechas ni se ofrece ni aplica el descuento) y **⭐ destacado** (el «pack del mes», siempre el primero). El servidor comprueba que los servicios son exactamente los del pack (contando repeticiones) y que está en temporada. Vienen dos de ejemplo («Madre e hija» e «Invitada de boda»), sin descuento: ponlo tú.
 - **Fidelidad (sellos)** (Ajustes → Fidelidad): cada visita a la que viene suma un sello; al completar la tarjeta (10 por defecto) hay un premio que **canjeas a mano** desde su ficha en «Clientas». La clienta ve su tarjeta en el enlace de su cita. Está **desactivado** hasta que lo actives.
 - **Toca retoque** (en el móvil de la clienta, sin servidor): si ya han pasado casi las semanas de retoque de un servicio de su última visita y no tiene otra cita con él, al entrar se le propone reservarlo, recordando el color que eligió la última vez.
-- **Test «¿qué manicura eres?»**: tres preguntas de un toque (tiempo, estilo, cuánto debe durar) y una recomendación lista para reservar (las atrevidas suman nail art si existe ese extra). En castellano, gallego e inglés.
+- **Test «¿qué manicura eres?»**: tres preguntas de un toque (tiempo, estilo, cuánto debe durar) y una recomendación lista para reservar (las atrevidas suman nail art si existe ese extra).
 - **«¿Aprovechas y añades algo?»**: en el enlace de su cita (si faltan más de 12 h) se ofrecen los servicios que **caben justo a continuación**, comprobado con el motor de huecos (horario, descansos y otras citas). Se suma a la cita (duración y precio) y se avisa a la clienta y a la dueña. No se ofrecen servicios con señal ni con casillas de seguridad (esos se reservan aparte).
 - **No hecho todavía:** «trae a una amiga, las dos ahorráis» (necesita códigos de invitación y descuento a dos), bonos y tarjetas regalo (pagos), y precios dinámicos de huecos tranquilos (es una decisión de negocio tuya).
+
+## Pedir cita fácil (el gancho) y la app
+
+- **Visible en la portada:** botón grande «Pedir cita fácil» en el héroe (con «3 toques · sin registrarte · instálala como app»), botón «Cita fácil» en la cabecera (en el móvil es el botón principal), barra fija inferior del móvil, y al final de la página junto a «Reserva completa».
+- **Instalar la app, siempre:** cada vez que se entra a `/cita` desde el navegador sale **arriba** una franja «Ten la app en tu móvil — solo para pedir cita, con un toque». En Android/Chrome el botón **Instalar** abre el aviso del propio móvil; en iPhone explica «Compartir → Añadir a pantalla de inicio» (iOS no deja instalar con un botón); desde el navegador de **Instagram, Facebook o TikTok** (donde no se puede instalar) le dice que abra la página en su navegador. «Ahora no» solo la esconde en esa visita: la próxima vez que pida cita fácil, vuelve a salir. Con la app ya instalada y abierta, no sale. La app instalada abre directamente `/cita`, o sea, **solo el módulo de reservas**.
+- **Packs y test en el modo fácil, sin recargar:** en «¿Qué te quieres hacer?» hay solo dos botones discretos, **🎁 Packs listos** y **🎀 Haz el test**. Los packs se piden como un servicio más (con su descuento); el test hace una pregunta por pantalla y termina en «Pedir esto». Los packs «para dos» y los extras se piden en la reserva completa, para no complicar el modo fácil. «Repetir mi cita» también recuerda los packs y las recomendaciones del test.
+
+## Sin traducciones
+
+Toda la web (reserva, Diva, servicios, mensajes y panel) está **solo en castellano**. Si ves en la base de datos columnas `lang` o `i18n` (en reservas, lista de espera, packs, extras y tendencias), son **herencia de una versión con gallego e inglés**: ya no se leen ni se escriben y no hacen daño; no hace falta tocarlas.
 
 ## Auditoría de visitas con varios servicios
 
