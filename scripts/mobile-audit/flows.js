@@ -498,6 +498,22 @@ async function check(page, label, vp, errors, shot) {
         await r.ctx.close();
       }
     }
+    // ===================== hero en escritorio: todo en la primera pantalla =====================
+    for (const d of [{ name: "desktop-1440x800", width: 1440, height: 800 }, { name: "laptop-1366x640", width: 1366, height: 640 }, { name: "desktop-1280x720", width: 1280, height: 720 }, { name: "desktop-1920x1080", width: 1920, height: 1080 }]) {
+      const vpd = { ...d, desktop: true };
+      const props = { services: SERVICES.slice(0, 6).map((s) => ({ id: s.id, slug: s.slug, name: s.name, durationMin: s.durationMin, priceCents: s.priceCents })), today: TODAY, contact: { address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", mapsUrl: "https://maps.example", phone: "670 424 348", whatsapp: "34670424348" } };
+      const { ctx, page, errors } = await setup(browser, vpd, "hero", props);
+      await page.waitForSelector(".hb__slot");
+      const m = await page.evaluate(() => {
+        const q = (s) => document.querySelector(s)?.getBoundingClientRect();
+        const h = q(".hero2"), card = q(".hookcard"), bk = q(".hb"), title = q(".hero__title");
+        return { h: Math.round(h.height), vh: window.innerHeight, card: !!card && card.width > 0, bookerBottom: Math.round(bk.bottom), titleLines: Math.round(title.height) };
+      });
+      log(`hero ${d.name} · todo cabe en la primera pantalla (${m.h}px de ${m.vh - 64}px útiles)`, vpd.name, m.h <= m.vh - 64 ? [] : [`mide ${m.h}px y caben ${m.vh - 64}px`]);
+      log(`hero ${d.name} · a la derecha está el gancho con el contacto`, vpd.name, m.card ? [] : ["no se ve la tarjeta"]);
+      await check(page, `hero ${d.name}`, vpd, errors, `hero-${d.name}`);
+      await ctx.close();
+    }
     // ===================== visita con cada servicio a su hora =====================
     {
       const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS };
@@ -685,16 +701,22 @@ async function check(page, label, vp, errors, shot) {
         await ctx.close();
       }
     }
-    // ===================== hero =====================
+    // ===================== hero: todo en la primera pantalla =====================
     {
-      const props = { services: SERVICES.slice(0, 5).map((s) => ({ id: s.id, slug: s.slug, name: s.name, durationMin: s.durationMin, priceCents: s.priceCents })), today: TODAY };
+      const props = { services: SERVICES.slice(0, 6).map((s) => ({ id: s.id, slug: s.slug, name: s.name, durationMin: s.durationMin, priceCents: s.priceCents })), today: TODAY, contact: { address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", mapsUrl: "https://maps.example", phone: "670 424 348", whatsapp: "34670424348" } };
       const { ctx, page, errors } = await setup(browser, vp, "hero", props);
       await page.waitForSelector(".hb__slot");
-      await page.click(".swatch >> nth=4"); // Burdeos
-      await page.waitForTimeout(500);
-      const name = await page.locator(".hand__name").innerText();
-      await check(page, "hero · mini-reserva y mano", vp, errors, "hero");
-      log("hero · al elegir Burdeos el selector lo recuerda", vp.name, /Burdeos/.test(name) ? [] : [`el selector dice: ${name}`]);
+      const gone = await page.locator(".hand, .swatch, .spin").count();
+      log("hero · ya no hay mano, esmaltes ni insignia giratoria", vp.name, gone === 0 ? [] : [`quedan ${gone} elementos`]);
+      const chips = await page.locator(".hb__chip").count();
+      log("hero · la mini-reserva ofrece 4 servicios y 3 huecos", vp.name, chips === 4 && (await page.locator(".hb__slot").count()) === 3 ? [] : [`servicios ${chips}`]);
+      const vis = await page.locator(".easycta:visible").count();
+      log("hero · el gancho «Pedir cita fácil» se ve (una sola vez)", vp.name, vis === 1 ? [] : [`visibles: ${vis}`]);
+      const m = await page.evaluate(() => ({ h: Math.round(document.querySelector(".hero2").getBoundingClientRect().height), vh: window.innerHeight }));
+      // la cabecera fija ocupa 64 px; en el móvil más pequeño (320×568) se admite un pequeño scroll
+      const room = m.vh - 64 + (vp.width < 340 ? 110 : 0);
+      log(`hero · cabe en la primera pantalla (${m.h}px de ${m.vh - 64}px útiles)`, vp.name, m.h <= room ? [] : [`mide ${m.h}px y caben ${room}px`]);
+      await check(page, "hero · mini-reserva y gancho", vp, errors, "hero");
       await ctx.close();
     }
     // ===================== cambiar hora =====================

@@ -143,7 +143,7 @@ export default async function Home() {
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }} />
       <SiteHeader />
       <main>
-        <Hero services={featured} today={today} />
+        <Hero services={featured} today={today} contact={{ address: salon.address, mapsUrl, phone: salon.phoneMobile, whatsapp: salon.whatsapp }} />
         <Marquee items={marqueeItems} />
 
         <section id="servicios" className="section section--tight">

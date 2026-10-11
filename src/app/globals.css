@@ -1312,3 +1312,63 @@ a, button, summary, label, input, select, textarea, [role="button"], [role="radi
 .mcta__main { gap: 8px; }
 
 @media (max-width: 420px) { .installbar__txt small { display: none; } }
+
+/* =====================================================================
+   HÉROE COMPACTO: todo en la primera pantalla (sin la mano, sin la insignia giratoria)
+   ===================================================================== */
+.hero2 { min-height: calc(100svh - 64px); padding-block: clamp(14px, 3.4vh, 44px); }
+.hero2__grid { grid-template-columns: minmax(0, 1.55fr) minmax(0, 0.75fr); gap: clamp(24px, 4vw, 56px); align-items: center; }
+.hero2__left .hero__title { font-size: clamp(2.1rem, min(4.9vw, 8.6vh), 4.8rem); line-height: 1.02; }
+.hero2__left .hero__lead { margin-top: clamp(8px, 1.6vh, 16px); font-size: clamp(1rem, 1.8vw, 1.15rem); max-width: 52ch; }
+.hero2__left .hb { margin-top: clamp(12px, 2.4vh, 22px); padding: clamp(12px, 1.8vh, 18px) clamp(14px, 2vw, 20px); gap: 8px; max-width: 640px; }
+.hb__q { font-size: 0.98rem; margin: 0; }
+.hb__live { font-size: 0.9rem; font-weight: 700; color: var(--plum); }
+.hb__chips { gap: 6px; }
+.hb__chip { flex-direction: row; align-items: baseline; gap: 6px; padding: 8px 12px; min-height: 44px; border-radius: var(--r-pill); font-size: 0.9rem; }
+.hb__chip small { font-size: 0.82rem; }
+.hb__slot { min-height: 44px; }
+.hb__foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 2px 14px; margin: 0; }
+.hb__foot .hb__scarcity { font-size: 0.88rem; }
+.hb__foot .hb__more { font-size: 0.88rem; min-height: 32px; display: inline-flex; align-items: center; }
+.hero2__left .hero__trust { margin-top: clamp(8px, 1.6vh, 14px); font-size: 0.88rem; gap: 4px 16px; }
+.hero2__left .easycta--mobile { display: none; }
+.hero2__right { display: grid; place-items: center; align-self: center; }
+.hookcard { display: grid; gap: 14px; width: 100%; max-width: 380px; padding: clamp(16px, 2.4vh, 24px); border-radius: var(--r-lg); background: rgba(255, 255, 255, 0.94); box-shadow: var(--shadow); }
+.hookcard .easycta { margin-top: 0; width: 100%; box-sizing: border-box; }
+.hookcard__txt { margin: 0; color: var(--plum-70); font-size: 0.95rem; line-height: 1.45; }
+.hookcard__list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 0.95rem; font-weight: 600; }
+.hookcard__list li { display: flex; align-items: flex-start; gap: 8px; }
+.hookcard__list svg { color: var(--magenta); flex: none; margin-top: 2px; }
+.hookcard__list a { text-decoration: none; overflow-wrap: anywhere; }
+.hookcard__list a:hover { color: var(--magenta); text-decoration: underline; }
+.hookcard__more { margin: 0; font-size: 0.92rem; }
+.hookcard__more a { color: var(--magenta); font-weight: 700; }
+/* móvil y tablet: una columna; el gancho sube bajo el titular y se quita la tarjeta lateral */
+@media (max-width: 900px) {
+  .hero2 { min-height: 0; padding-block: 16px 24px; }
+  .hero2__grid { grid-template-columns: minmax(0, 1fr); }
+  .hero2__right { display: none; }
+  .hero2__left .easycta--mobile { display: flex; margin-top: 14px; width: 100%; box-sizing: border-box; }
+  .hero2__left .hb { margin-top: 12px; }
+}
+@media (max-width: 640px) {
+  .hero2__left .hero__title { font-size: clamp(2rem, 9.4vw, 2.7rem); }
+  .hero2__left .hero__trust { display: none; }
+  .hb__q { font-size: 0.92rem; }
+  .hb__live { font-size: 0.78rem; }
+}
+/* portátiles bajitos: se aprieta un poco más para que siga cabiendo */
+@media (min-width: 901px) and (max-height: 720px) {
+  .hero2__left .hero__trust { display: none; }
+  .hero2__left .hero__lead { display: none; }
+  .hookcard__txt { display: none; }
+}
+
+/* móvil: servicios y huecos en una sola fila deslizable (si no, cada servicio ocupa una línea y el héroe no cabe) */
+@media (max-width: 640px) {
+  .hb__chips, .hb__slots { flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch; padding-bottom: 2px; scrollbar-width: none; }
+  .hb__chips::-webkit-scrollbar, .hb__slots::-webkit-scrollbar { display: none; }
+  .hb__chip, .hb__slot, .hb__skeleton { flex: none; scroll-snap-align: start; white-space: nowrap; }
+  .hb__foot { justify-content: flex-start; }
+  .hero2__left .hero__lead { font-size: 1rem; }
+}
