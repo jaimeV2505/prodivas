@@ -5,7 +5,10 @@ import { BookingError, respondToBooking } from "@/lib/bookings";
 import { query } from "@/lib/db";
 import { fallbackByProviderId } from "@/lib/fallback";
 import { enabled, logSend, sendWhatsAppText } from "@/lib/messaging";
+import { fill, type Lang } from "@/lib/i18n";
+import { msgDict } from "@/lib/i18n/msg";
 import { notifyOwnerResponse, whenWords } from "@/lib/notify";
+import { phoneDigits } from "@/lib/site";
 import { offerFreedSlot } from "@/lib/waitlist";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +34,7 @@ type WaStatus = { id: string; status: string; errors?: { title?: string; code?: 
 type Msg = {
   from: string;
   type: string;
+  text?: { body?: string };
   button?: { payload?: string };
   interactive?: { button_reply?: { id?: string } };
 };
@@ -64,6 +68,24 @@ export async function POST(req: NextRequest) {
       if (st.status === "failed") await fallbackByProviderId(st.id, why);
     }
     for (const m of messages) {
+      // «BAJA» / «STOP»: sin mensajes opcionales (los avisos de la cita siguen llegando)
+      if (m.type === "text" && /^\s*(baja|baixa|stop|unsubscribe)\s*[.!]*\s*$/i.test(m.text?.body ?? "")) {
+        try {
+          const key = phoneDigits(m.from).slice(-9);
+          const who = await query<{ id: number; lang: string | null }>(
+            `UPDATE customers c SET optout_at = COALESCE(optout_at, now()) WHERE c.phone_key = $1
+             RETURNING c.id, (SELECT b.lang FROM bookings b WHERE b.customer_id = c.id ORDER BY b.created_at DESC LIMIT 1) AS lang`,
+            [key],
+          );
+          if (who.length && enabled.whatsapp()) {
+            const lang = (who[0].lang === "gl" || who[0].lang === "en" ? who[0].lang : "es") as Lang;
+            await logSend(null, "reply", "whatsapp", await sendWhatsAppText(m.from, msgDict(lang).replyOptout));
+          }
+        } catch (e) {
+          console.error("[whatsapp:optout]", e);
+        }
+        continue;
+      }
       const id = m.button?.payload ?? m.interactive?.button_reply?.id ?? "";
       const match = /^([CX]):([A-Z0-9]{4,16})$/.exec(id);
       if (!match) continue;
@@ -75,10 +97,9 @@ export async function POST(req: NextRequest) {
           if (r.state === "cancelled") await offerFreedSlot(r.booking);
         }
         if (enabled.whatsapp()) {
-          const text =
-            r.state === "confirmed"
-              ? `¡Perfecto! Te esperamos ${whenWords(r.booking.startsAt)}. Gracias por confirmar.`
-              : "Cita cancelada. Gracias por avisar. Cuando quieras otra, pídela en nuestra web o llámanos.";
+          const lang = (r.booking.lang === "gl" || r.booking.lang === "en" ? r.booking.lang : "es") as Lang;
+          const M = msgDict(lang);
+          const text = r.state === "confirmed" ? fill(M.replyConfirmed, { words: whenWords(r.booking.startsAt, lang) }) : M.replyCancelled;
           await logSend(r.booking.id, "reply", "whatsapp", await sendWhatsAppText(m.from, text));
         }
       } catch (e) {

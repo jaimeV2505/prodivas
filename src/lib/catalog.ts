@@ -1,3 +1,5 @@
+import { CONFIG } from "./config";
+import { todayIn } from "./dates";
 import { query } from "./db";
 import { getDepositPolicy } from "./deposit";
 import type { Addon, Pack, Service } from "@/components/BookingFlow";
@@ -21,8 +23,12 @@ export async function loadCatalog(): Promise<Catalog> {
          FROM addons WHERE active ORDER BY sort, id`,
       ),
       query<Pack>(
-        `SELECT id, slug, name, emoji, description, service_slugs AS "serviceSlugs", discount_percent AS "discountPercent", i18n
-         FROM packages WHERE active ORDER BY sort, id`,
+        `SELECT id, slug, name, emoji, description, service_slugs AS "serviceSlugs", discount_percent AS "discountPercent", i18n,
+                occasion, people, featured
+         FROM packages
+         WHERE active AND (starts_on IS NULL OR starts_on <= $1::date) AND (ends_on IS NULL OR ends_on >= $1::date)
+         ORDER BY featured DESC, sort, id`,
+        [todayIn(CONFIG.tz)],
       ),
       getDepositPolicy(),
     ]);

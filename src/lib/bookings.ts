@@ -2,12 +2,14 @@ import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import { getSlotRows } from "./availability";
 import { CONFIG } from "./config";
 import { addDays, todayIn } from "./dates";
-import { query, tx, type Runner } from "./db";
+import { query, run, tx, type Runner } from "./db";
 import { BookingError, type ErrCode } from "./errors";
-import { createCheckoutSession, settleDeposit, stripeEnabled } from "./payments";
+import { createCheckoutSession, DEPOSIT_REFUND_HOURS, settleDeposit, stripeEnabled } from "./payments";
+import { pickAlternatives } from "./alternatives";
 import { effectiveDeposit, getDepositPolicy } from "./deposit";
+import { localParts } from "./format";
 import { phoneDigits, samePhone } from "./site";
-import { loadVisit, type Visit } from "./visit";
+import { loadVisit, MAX_SERVICES, type Visit } from "./visit";
 
 export { BookingError };
 export type { ErrCode };
@@ -77,6 +79,17 @@ export type BookingSummary = {
   staffName: string;
   customerId: number | null;
   canCancel: boolean;
+  /** Horas de antelación para cancelar sin perder la señal (el mayor plazo de sus servicios). */
+  noticeHours: number;
+  /** Horas para que la señal se devuelva si cancela. */
+  refundHours: number;
+  groupId: string | null;
+  cancelWhy: string | null;
+  /** El centro le ha pedido mover la cita (cerrar el día): sin plazo y sin penalización. */
+  rescheduleFree: boolean;
+  centreNote: string | null;
+  /** Idioma de la clienta (los mensajes salen en él). */
+  lang: string;
   customerResponse: string | null;
   cancelReason: string | null;
 };
@@ -104,7 +117,21 @@ type SummaryRow = {
   can_cancel: boolean;
   customer_response: string | null;
   cancel_reason: string | null;
+  notice_hours: number;
+  refund_hours: number;
+  group_id: string | null;
+  cancel_why: string | null;
+  reschedule_free: boolean;
+  centre_note: string | null;
+  lang: string;
 };
+
+/** Plazo de cancelación de una cita: el mayor de los plazos propios de sus servicios (o la regla general). */
+const noticeExpr = (alias: string) =>
+  `COALESCE((SELECT MAX(COALESCE(s2.cancel_notice_hours, ${CONFIG.cancelNoticeHours})) FROM booking_services bs2 JOIN services s2 ON s2.id = bs2.service_id WHERE bs2.booking_id = ${alias}.id), ${CONFIG.cancelNoticeHours})`;
+/** Horas para que se devuelva la señal: el plazo propio de algún servicio, y si no, DEPOSIT_REFUND_HOURS. */
+const refundExpr = (alias: string) =>
+  `COALESCE((SELECT MAX(s2.cancel_notice_hours) FROM booking_services bs2 JOIN services s2 ON s2.id = bs2.service_id WHERE bs2.booking_id = ${alias}.id), ${DEPOSIT_REFUND_HOURS})`;
 
 const SUMMARY_SELECT = `
   SELECT b.id, b.code, b.hold_token, b.status, b.starts_at, b.ends_at, b.staff_id, b.customer_id,
@@ -114,7 +141,9 @@ const SUMMARY_SELECT = `
          COALESCE((SELECT SUM(bs.price_cents)::int FROM booking_services bs WHERE bs.booking_id = b.id), s.price_cents) AS price_cents,
          COALESCE((SELECT array_agg(bs.service_id ORDER BY bs.position) FILTER (WHERE bs.service_id IS NOT NULL) FROM booking_services bs WHERE bs.booking_id = b.id), ARRAY[b.service_id]) AS service_ids,
          st.name AS staff_name,
-         (b.starts_at - now()) >= make_interval(hours => ${CONFIG.cancelNoticeHours}) AS can_cancel
+         (b.starts_at - now()) >= make_interval(hours => ${noticeExpr("b")}) AS can_cancel,
+         ${noticeExpr("b")} AS notice_hours, ${refundExpr("b")} AS refund_hours,
+         b.group_id, b.cancel_why, b.reschedule_free, b.centre_note, b.lang
   FROM bookings b
   JOIN services s ON s.id = b.service_id
   JOIN staff st ON st.id = b.staff_id
@@ -143,6 +172,13 @@ function mapSummary(r: SummaryRow): BookingSummary {
     staffName: r.staff_name,
     customerId: r.customer_id,
     canCancel: r.can_cancel,
+    noticeHours: r.notice_hours,
+    refundHours: r.refund_hours,
+    groupId: r.group_id,
+    cancelWhy: r.cancel_why,
+    rescheduleFree: r.reschedule_free,
+    centreNote: r.centre_note,
+    lang: r.lang,
     customerResponse: r.customer_response,
     cancelReason: r.cancel_reason,
   };
@@ -181,18 +217,23 @@ export async function listCustomerBookings(customerIds: number[], opts: { limit?
   return rows.map(mapSummary);
 }
 
-/** El pack solo se aplica si los servicios elegidos son EXACTAMENTE los del pack (los extras no cuentan). */
+const safeLang = (x: string | undefined | null): string => (x === "gl" || x === "en" ? x : "es");
+
+/**
+ * El pack solo se aplica si los servicios elegidos son EXACTAMENTE los del pack (los extras no cuentan; en un pack «para dos»
+ * van dos veces) y está activo y dentro de su temporada (si la tiene).
+ */
 async function matchPackage(q: Runner, visit: Visit, slug: string | null): Promise<{ slug: string; percent: number } | null> {
   if (!slug) return null;
-  const r = (await q(`SELECT slug, discount_percent, service_slugs FROM packages WHERE slug = $1 AND active`, [slug])) as unknown as {
-    slug: string;
-    discount_percent: number;
-    service_slugs: string[];
-  }[];
+  const r = (await q(
+    `SELECT slug, discount_percent, service_slugs, people FROM packages
+     WHERE slug = $1 AND active AND (starts_on IS NULL OR starts_on <= $2::date) AND (ends_on IS NULL OR ends_on >= $2::date)`,
+    [slug, todayIn(CONFIG.tz)],
+  )) as unknown as { slug: string; discount_percent: number; service_slugs: string[]; people: number }[];
   if (!r[0]) return null;
-  const want = new Set(r[0].service_slugs);
-  const have = new Set(visit.items.map((i) => i.slug));
-  if (visit.items.length !== want.size || want.size !== have.size || [...want].some((x) => !have.has(x))) return null; // sin servicios repetidos
+  const want = (r[0].people === 2 ? [...r[0].service_slugs, ...r[0].service_slugs] : [...r[0].service_slugs]).sort().join("|");
+  const have = visit.items.map((i) => i.slug).sort().join("|");
+  if (want !== have) return null;
   return { slug: r[0].slug, percent: r[0].discount_percent };
 }
 
@@ -457,6 +498,7 @@ export async function confirmBooking(input: {
   email?: string | null;
   notes?: string | null;
   acks?: string[];
+  lang?: string;
 }): Promise<{ booking: BookingSummary; checkoutUrl?: string; noShowCount: number }> {
   const out = await tx(async (q) => {
     const found = (await q(
@@ -484,9 +526,9 @@ export async function confirmBooking(input: {
         await q(
           `UPDATE bookings
              SET status = 'HOLD', hold_expires_at = now() + interval '35 minutes', code = COALESCE(code, $2),
-                 customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6, deposit_status = 'PENDING'
+                 customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6, deposit_status = 'PENDING', lang = $7
            WHERE id = $1::uuid`,
-          [input.holdId, newCode(), input.name, input.phone, input.email || null, input.notes || null],
+          [input.holdId, newCode(), input.name, input.phone, input.email || null, input.notes || null, safeLang(input.lang)],
         );
       } catch (e) {
         if (isExclusionViolation(e)) throw new BookingError("SLOT_TAKEN", "Lo sentimos, ese hueco acaba de ocuparse.", 409);
@@ -499,10 +541,10 @@ export async function confirmBooking(input: {
           `UPDATE bookings
              SET status = 'CONFIRMED', code = COALESCE(code, $2), hold_expires_at = NULL,
                  customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6,
-                 confirmed_at = now(),
+                 confirmed_at = now(), lang = $9,
                  remind_at = ${remindAtSql("starts_at", "$7::text", "$8::int")}
            WHERE id = $1::uuid`,
-          [input.holdId, newCode(), input.name, input.phone, input.email || null, input.notes || null, CONFIG.tz, REMINDER_HOURS],
+          [input.holdId, newCode(), input.name, input.phone, input.email || null, input.notes || null, CONFIG.tz, REMINDER_HOURS, safeLang(input.lang)],
         );
       } catch (e) {
         if (isExclusionViolation(e)) throw new BookingError("SLOT_TAKEN", "Lo sentimos, ese hueco acaba de ocuparse.", 409);
@@ -555,6 +597,7 @@ export async function confirmGroup(input: {
   email?: string | null;
   notes?: string | null;
   acks?: string[];
+  lang?: string;
 }): Promise<{ bookings: BookingSummary[]; checkoutUrl?: string; noShowCount: number; fresh: boolean }> {
   const ids = input.legs.map((l) => l.holdId);
   if (input.legs.length < 2 || input.legs.length > 4) throw new BookingError("INVALID", "Una visita en horas distintas lleva de 2 a 4 citas.", 400);
@@ -603,20 +646,20 @@ export async function confirmGroup(input: {
           await q(
             `UPDATE bookings
                SET status = 'HOLD', hold_expires_at = now() + interval '35 minutes', code = COALESCE(code, $2), group_id = $7::uuid,
-                   customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6,
+                   customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6, lang = $8,
                    deposit_status = CASE WHEN deposit_cents > 0 THEN 'PENDING' ELSE 'NONE' END
              WHERE id = $1::uuid`,
-            [r.id, newCode(), input.name, input.phone, input.email || null, input.notes || null, groupId],
+            [r.id, newCode(), input.name, input.phone, input.email || null, input.notes || null, groupId, safeLang(input.lang)],
           );
         } else {
           await q(
             `UPDATE bookings
                SET status = 'CONFIRMED', code = COALESCE(code, $2), hold_expires_at = NULL, group_id = $9::uuid,
                    customer_name = $3, customer_phone = $4, customer_email = $5, notes = $6,
-                   confirmed_at = now(),
+                   confirmed_at = now(), lang = $10,
                    remind_at = ${remindAtSql("starts_at", "$7::text", "$8::int")}
              WHERE id = $1::uuid`,
-            [r.id, newCode(), input.name, input.phone, input.email || null, input.notes || null, CONFIG.tz, REMINDER_HOURS, groupId],
+            [r.id, newCode(), input.name, input.phone, input.email || null, input.notes || null, CONFIG.tz, REMINDER_HOURS, groupId, safeLang(input.lang)],
           );
           noShowCount = await linkCustomer(q, r.id);
         }
@@ -684,28 +727,198 @@ export async function finalizePaidBooking(
 /* 3) CANCELAR                                                         */
 /* ------------------------------------------------------------------ */
 
-export async function cancelByCustomer(code: string, token: string): Promise<BookingSummary> {
-  const id = await tx(async (q) => {
-    const found = (await q(
-      `SELECT id, status, (starts_at - now()) >= make_interval(hours => $3::int) AS ok
-       FROM bookings WHERE code = $1 AND starts_with(hold_token, $2) FOR UPDATE`,
-      [code, tokenOk(token) ? token : "~invalid~", CONFIG.cancelNoticeHours],
-    )) as unknown as { id: string; status: string; ok: boolean }[];
+export type CancelWhy = "sick" | "work" | "other";
+export const CANCEL_WHYS: CancelWhy[] = ["sick", "work", "other"];
+
+type CancelRow = { id: string; status: string; future: boolean; late: boolean; reschedule_free: boolean };
+const CANCEL_SELECT = `SELECT id, status, (starts_at > now()) AS future, reschedule_free,
+       (starts_at - now()) < make_interval(hours => ${noticeExpr("bookings")}) AS late
+     FROM bookings`;
+
+/**
+ * Cancela una cita en nombre de la clienta. Cancelar tarde SIEMPRE se permite (el hueco se libera para otra persona);
+ * lo que cambia es el motivo que se guarda y la señal (se retiene si es tarde, se devuelve si el centro pidió mover la cita).
+ */
+async function cancelRow(q: Runner, row: CancelRow, source: "customer" | "customer_reminder", why: CancelWhy | null): Promise<void> {
+  const reason = row.reschedule_free ? "centre" : row.late ? `${source}_late` : source;
+  await q(
+    `UPDATE bookings SET status = 'CANCELLED', cancelled_at = now(), cancel_reason = $2, cancel_why = $3,
+            customer_response = CASE WHEN $4 THEN 'CANCELLED' ELSE customer_response END, responded_at = CASE WHEN $4 THEN now() ELSE responded_at END
+     WHERE id = $1::uuid`,
+    [row.id, reason, why, source === "customer_reminder"],
+  );
+}
+
+export async function cancelByCustomer(code: string, token: string, why: CancelWhy | null = null): Promise<BookingSummary> {
+  const { id, refund } = await tx(async (q) => {
+    const found = (await q(`${CANCEL_SELECT} WHERE code = $1 AND starts_with(hold_token, $2) FOR UPDATE`, [code, tokenOk(token) ? token : "~invalid~"])) as unknown as CancelRow[];
     const row = found[0];
     if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
-    if (row.status === "CANCELLED") return row.id;
-    if (!row.ok) {
-      throw new BookingError(
-        "TOO_LATE",
-        `Con menos de ${CONFIG.cancelNoticeHours} horas de antelación no se puede cancelar online. Llámanos al ${CONFIG.salon.phoneMobile}.`,
-        409,
-      );
-    }
-    await q(`UPDATE bookings SET status = 'CANCELLED', cancelled_at = now(), cancel_reason = 'customer' WHERE id = $1::uuid`, [row.id]);
-    return row.id;
+    if (row.status === "CANCELLED") return { id: row.id, refund: false };
+    if (row.status !== "CONFIRMED" || !row.future) throw new BookingError("HOLD_EXPIRED", "Esta cita ya ha pasado.", 410);
+    await cancelRow(q, row, "customer", why);
+    return { id: row.id, refund: row.reschedule_free };
   });
-  await settleDeposit(id, "policy");
+  await settleDeposit(id, refund ? "refund" : "policy");
   return (await getSummaryById(id))!;
+}
+
+/** Cancela todas las citas que quedan de una visita en horas distintas (cada una con su propia señal y plazo). */
+export async function cancelGroupByCustomer(code: string, token: string, why: CancelWhy | null = null): Promise<BookingSummary[]> {
+  const done = await tx(async (q) => {
+    const head = (await q(`SELECT group_id FROM bookings WHERE code = $1 AND starts_with(hold_token, $2)`, [code, tokenOk(token) ? token : "~invalid~"])) as unknown as { group_id: string | null }[];
+    if (!head[0]) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
+    if (!head[0].group_id) throw new BookingError("INVALID", "Esta cita no forma parte de una visita en varias horas.", 400);
+    const legs = (await q(`${CANCEL_SELECT} WHERE group_id = $1::uuid AND status = 'CONFIRMED' AND starts_at > now() ORDER BY starts_at FOR UPDATE`, [head[0].group_id])) as unknown as CancelRow[];
+    for (const l of legs) await cancelRow(q, l, "customer", why);
+    return legs.map((l) => ({ id: l.id, refund: l.reschedule_free }));
+  });
+  const out: BookingSummary[] = [];
+  for (const d of done) {
+    await settleDeposit(d.id, d.refund ? "refund" : "policy");
+    out.push((await getSummaryById(d.id))!);
+  }
+  return out;
+}
+
+/**
+ * «¿Mejor la movemos?»: hasta 3 huecos libres, de la misma duración (extras incluidos), lo más parecidos a su cita.
+ * No incluye la hora actual de la propia cita.
+ */
+export async function suggestAlternatives(code: string, token: string, n = 3): Promise<{ startsAt: string; endsAt: string }[]> {
+  const found = (await query(
+    `SELECT id, status, starts_at, ends_at, (starts_at > now()) AS future FROM bookings WHERE code = $1 AND starts_with(hold_token, $2)`,
+    [code, tokenOk(token) ? token : "~invalid~"],
+  )) as unknown as { id: string; status: string; starts_at: Date; ends_at: Date; future: boolean }[];
+  const row = found[0];
+  if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
+  if (row.status !== "CONFIRMED" || !row.future) return [];
+  const m = await bookingVisitMetrics(run, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
+  const today = todayIn(CONFIG.tz);
+  const rows = await getSlotRows({ from: today, to: addDays(today, Math.min(21, CONFIG.maxDaysAhead)), durationMin: m.duration, bufferMin: m.buffer, stepMin: m.step, staffId: null, excludeBookingId: row.id });
+  const orig = localParts(new Date(row.starts_at).toISOString());
+  const free = rows
+    .filter((r) => r.available && new Date(r.startsAt).getTime() > Date.now())
+    .map((r) => {
+      const p = localParts(r.startsAt);
+      return { startsAt: new Date(r.startsAt).toISOString(), day: p.day, minutes: p.minutes };
+    });
+  const best = pickAlternatives(free, { startsAt: new Date(row.starts_at).toISOString(), day: orig.day, minutes: orig.minutes }, n);
+  return best.map((b) => ({ startsAt: b.startsAt, endsAt: new Date(new Date(b.startsAt).getTime() + m.duration * 60000).toISOString() }));
+}
+
+export type AddableService = { id: number; name: string; durationMin: number; priceCents: number };
+
+type ExtRow = { id: string; status: string; staff_id: number; starts_at: Date; ends_at: Date; in_time: boolean };
+const EXT_SELECT = `SELECT id, status, staff_id, starts_at, ends_at, (starts_at - now()) >= make_interval(hours => ${RESCHEDULE_HOURS}) AS in_time FROM bookings`;
+
+/**
+ * Servicios que se pueden AÑADIR a una cita ya reservada: los que caben justo a continuación (comprobado con el motor de
+ * huecos: horario, descansos y otras citas). No se ofrecen los que llevan señal o casillas de seguridad (esos se reservan
+ * aparte), ni cuando falta poco para la cita ni si ya lleva el máximo de servicios.
+ */
+export async function addableServices(code: string, token: string): Promise<AddableService[]> {
+  const found = (await query(`${EXT_SELECT} WHERE code = $1 AND starts_with(hold_token, $2)`, [code, tokenOk(token) ? token : "~invalid~"])) as unknown as ExtRow[];
+  const row = found[0];
+  if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
+  if (row.status !== "CONFIRMED" || !row.in_time) return [];
+  const m = await bookingVisitMetrics(run, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
+  const have = ((await query(`SELECT service_id FROM booking_services WHERE booking_id = $1::uuid AND NOT is_addon AND service_id IS NOT NULL`, [row.id])) as unknown as { service_id: number }[]).map((r) => r.service_id);
+  if (have.length >= MAX_SERVICES) return [];
+  const cands = (await query(
+    `SELECT id, name, duration_min, price_cents, buffer_min FROM services
+     WHERE active AND consent_kind IS NULL AND deposit_cents = 0 AND NOT (id = ANY($1::int[])) ORDER BY sort, id`,
+    [have],
+  )) as unknown as { id: number; name: string; duration_min: number; price_cents: number; buffer_min: number }[];
+  const day = localParts(new Date(row.starts_at).toISOString()).day;
+  const start = new Date(row.starts_at).getTime();
+  const cache = new Map<string, boolean>();
+  const out: AddableService[] = [];
+  for (const c of cands) {
+    const key = `${c.duration_min}:${c.buffer_min}`;
+    if (!cache.has(key)) {
+      const rows = await getSlotRows({ from: day, to: day, durationMin: m.duration + c.duration_min, bufferMin: c.buffer_min, stepMin: m.step, staffId: row.staff_id, excludeBookingId: row.id });
+      cache.set(key, rows.some((r) => new Date(r.startsAt).getTime() === start && r.available));
+    }
+    if (cache.get(key)) out.push({ id: c.id, name: c.name, durationMin: c.duration_min, priceCents: c.price_cents });
+  }
+  return out.slice(0, 6);
+}
+
+/** Añade un servicio a una cita ya reservada (alarga la cita; el precio y la duración se actualizan). */
+export async function addServiceToBooking(input: { code: string; token: string; serviceId: number }): Promise<{ booking: BookingSummary; old: { startsAt: string; endsAt: string }; added: string }> {
+  const allowed = await addableServices(input.code, input.token);
+  const pick = allowed.find((a) => a.id === input.serviceId);
+  if (!pick) throw new BookingError("CONFLICT", "Ese servicio ya no se puede añadir a tu cita.", 409);
+  const out = await tx(async (q) => {
+    const found = (await q(`${EXT_SELECT} WHERE code = $1 AND starts_with(hold_token, $2) FOR UPDATE`, [input.code, tokenOk(input.token) ? input.token : "~invalid~"])) as unknown as ExtRow[];
+    const row = found[0];
+    if (!row || row.status !== "CONFIRMED" || !row.in_time) throw new BookingError("CONFLICT", "Ya no se puede cambiar esta cita.", 409);
+    const svc = ((await q(`SELECT id, name, duration_min, price_cents, buffer_min FROM services WHERE id = $1::int AND active`, [input.serviceId])) as unknown as { id: number; name: string; duration_min: number; price_cents: number; buffer_min: number }[])[0];
+    if (!svc) throw new BookingError("NOT_FOUND", "Ese servicio ya no está disponible.", 404);
+    const m = await bookingVisitMetrics(q, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
+    const newDur = m.duration + svc.duration_min;
+    try {
+      await q(
+        `UPDATE bookings SET ends_at = starts_at + make_interval(mins => $2::int), blocked_until = starts_at + make_interval(mins => $3::int) WHERE id = $1::uuid`,
+        [row.id, newDur, newDur + svc.buffer_min],
+      );
+    } catch (e) {
+      if (isExclusionViolation(e)) throw new BookingError("SLOT_TAKEN", "Justo después de tu cita ya hay otra. No se puede añadir.", 409);
+      throw e;
+    }
+    await q(
+      `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min)
+       VALUES ($1::uuid, $2::int, (SELECT COALESCE(MAX(position), -1) + 1 FROM booking_services WHERE booking_id = $1::uuid), $3, $4::int, $5::int, 0, $6::int)`,
+      [row.id, svc.id, svc.name, svc.duration_min, svc.price_cents, svc.buffer_min],
+    );
+    return { id: row.id, old: { startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString() }, added: svc.name };
+  });
+  return { booking: (await getSummaryById(out.id))!, old: out.old, added: out.added };
+}
+
+/** «Ceder mi cita»: la cita pasa a otra persona, que recibe su propio enlace. El enlace anterior deja de valer. */
+export async function transferBooking(input: { code: string; token: string; name: string; phone: string }): Promise<{ booking: BookingSummary; oldName: string | null }> {
+  const out = await tx(async (q) => {
+    const found = (await q(
+      `SELECT id, status, customer_name, customer_phone, starts_at, ends_at, (starts_at > now()) AS future FROM bookings WHERE code = $1 AND starts_with(hold_token, $2) FOR UPDATE`,
+      [input.code, tokenOk(input.token) ? input.token : "~invalid~"],
+    )) as unknown as { id: string; status: string; customer_name: string | null; customer_phone: string | null; starts_at: Date; ends_at: Date; future: boolean }[];
+    const row = found[0];
+    if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
+    if (row.status !== "CONFIRMED" || !row.future) throw new BookingError("HOLD_EXPIRED", "Esta cita ya no se puede ceder.", 410);
+    if (row.customer_phone && samePhone(input.phone, row.customer_phone)) throw new BookingError("INVALID", "Ese es tu mismo teléfono. Escribe el de la otra persona.", 400);
+    await assertCustomerFree(q, input.phone, [{ start: row.starts_at, end: row.ends_at }], [row.id], 1);
+    await q(
+      `UPDATE bookings
+         SET customer_name = $2, customer_phone = $3, customer_email = NULL, hold_token = $4, customer_id = NULL,
+             customer_response = NULL, responded_at = NULL, reminder_sent_at = NULL, reminder_attempts = 0, reminder_prev_sent_at = NULL, reminder_prev_attempts = 0, owner_alerted_at = NULL,
+             remind_at = ${remindAtSql("starts_at", "$5::text", "$6::int")}
+       WHERE id = $1::uuid`,
+      [row.id, input.name, input.phone, newToken(), CONFIG.tz, REMINDER_HOURS],
+    );
+    await linkCustomer(q, row.id);
+    return { id: row.id, oldName: row.customer_name };
+  });
+  return { booking: (await getSummaryById(out.id))!, oldName: out.oldName };
+}
+
+/**
+ * «Cerrar el día» (la dueña): las citas de ese día quedan «por mover» (sin plazo ni penalización para la clienta),
+ * y se bloquea el día entero para que nadie reserve. Devuelve las citas afectadas para avisarlas.
+ */
+export async function closeDay(input: { day: string; note: string | null }): Promise<BookingSummary[]> {
+  const ids = (await query<{ id: string }>(
+    `SELECT id FROM bookings WHERE status = 'CONFIRMED' AND starts_at > now() AND to_char(starts_at AT TIME ZONE $2::text, 'YYYY-MM-DD') = $1 ORDER BY starts_at`,
+    [input.day, CONFIG.tz],
+  )).map((r) => r.id);
+  if (ids.length) {
+    await query(`UPDATE bookings SET reschedule_free = true, centre_note = $2, customer_response = NULL WHERE id = ANY($1::uuid[])`, [ids, input.note]);
+  }
+  await addTimeOff({ staffId: null, day: input.day, reason: "Día cerrado" });
+  const out: BookingSummary[] = [];
+  for (const id of ids) out.push((await getSummaryById(id))!);
+  return out;
 }
 
 /** Cancelación desde el panel: el centro cancela, así que la señal se devuelve siempre. */
@@ -734,15 +947,15 @@ export async function rescheduleBooking(input: {
     const where = input.bookingId ? `id = $1::uuid` : `code = $1 AND starts_with(hold_token, $2)`;
     const params = input.bookingId ? [input.bookingId] : [input.code ?? "", input.token && tokenOk(input.token) ? input.token : "~invalid~"];
     const found = (await q(
-      `SELECT id, status, staff_id, starts_at, ends_at, customer_phone, (starts_at > now()) AS future,
+      `SELECT id, status, staff_id, starts_at, ends_at, customer_phone, (starts_at > now()) AS future, reschedule_free,
               (starts_at - now()) >= make_interval(hours => ${RESCHEDULE_HOURS}) AS in_time
        FROM bookings WHERE ${where} FOR UPDATE`,
       params,
-    )) as unknown as { id: string; status: string; staff_id: number; starts_at: Date; ends_at: Date; customer_phone: string | null; future: boolean; in_time: boolean }[];
+    )) as unknown as { id: string; status: string; staff_id: number; starts_at: Date; ends_at: Date; customer_phone: string | null; future: boolean; in_time: boolean; reschedule_free: boolean }[];
     const row = found[0];
     if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
     if (row.status !== "CONFIRMED" || !row.future) throw new BookingError("HOLD_EXPIRED", "Esta cita ya no se puede cambiar.", 410);
-    if (!input.admin && !row.in_time) {
+    if (!input.admin && !row.in_time && !row.reschedule_free) {
       throw new BookingError("TOO_LATE", `Con menos de ${RESCHEDULE_HOURS} horas de antelación no se puede cambiar online. Llámanos al ${CONFIG.salon.phoneMobile}.`, 409);
     }
 
@@ -777,8 +990,8 @@ export async function rescheduleBooking(input: {
                ends_at = $3::timestamptz + make_interval(mins => $4::int),
                blocked_until = $3::timestamptz + make_interval(mins => $7::int),
                remind_at = ${remindAtSql("$3::timestamptz", "$5::text", "$6::int")},
-               reminder_sent_at = NULL, reminder_attempts = 0, customer_response = NULL, responded_at = NULL,
-               owner_alerted_at = NULL, reschedule_count = reschedule_count + 1
+               reminder_sent_at = NULL, reminder_attempts = 0, reminder_prev_sent_at = NULL, reminder_prev_attempts = 0, customer_response = NULL, responded_at = NULL,
+               owner_alerted_at = NULL, reschedule_count = reschedule_count + 1, reschedule_free = false, centre_note = NULL
          WHERE id = $1::uuid`,
         [row.id, staffId, input.startsAt, duration, CONFIG.tz, REMINDER_HOURS, duration + buffer],
       );
@@ -853,10 +1066,12 @@ export async function respondToBooking(input: {
   action: "confirm" | "cancel";
   token?: string;
   phone?: string;
+  why?: CancelWhy | null;
 }): Promise<{ state: ResponseState; changed: boolean; booking: BookingSummary }> {
   const out = await tx(async (q) => {
     const found = (await q(
-      `SELECT id, status, hold_token, customer_phone, customer_response, (starts_at > now()) AS future
+      `SELECT id, status, hold_token, customer_phone, customer_response, (starts_at > now()) AS future, reschedule_free,
+              (starts_at - now()) < make_interval(hours => ${noticeExpr("bookings")}) AS late
        FROM bookings WHERE code = $1 FOR UPDATE`,
       [input.code],
     )) as unknown as {
@@ -866,6 +1081,8 @@ export async function respondToBooking(input: {
       customer_phone: string | null;
       customer_response: string | null;
       future: boolean;
+      reschedule_free: boolean;
+      late: boolean;
     }[];
     const row = found[0];
     const authorised =
@@ -889,17 +1106,11 @@ export async function respondToBooking(input: {
       return { state: "confirmed" as const, changed, booking: await loadSummary(q, row.id) };
     }
 
-    await q(
-      `UPDATE bookings
-         SET status = 'CANCELLED', cancelled_at = now(), cancel_reason = 'customer_reminder',
-             customer_response = 'CANCELLED', responded_at = now()
-       WHERE id = $1::uuid`,
-      [row.id],
-    );
-    return { state: "cancelled" as const, changed: true, booking: await loadSummary(q, row.id) };
+    await cancelRow(q, { id: row.id, status: row.status, future: row.future, late: row.late, reschedule_free: row.reschedule_free }, "customer_reminder", input.why ?? null);
+    return { state: "cancelled" as const, changed: true, booking: await loadSummary(q, row.id), refund: row.reschedule_free };
   });
   if (out.state === "cancelled") {
-    await settleDeposit(out.booking.id, "policy");
+    await settleDeposit(out.booking.id, (out as { refund?: boolean }).refund ? "refund" : "policy");
     return { ...out, booking: (await getSummaryById(out.booking.id)) ?? out.booking };
   }
   return out;

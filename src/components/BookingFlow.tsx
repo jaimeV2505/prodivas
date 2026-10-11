@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
 import { discounted, matchPack, suggest } from "@/lib/combos";
+import { colorFromNotes, dueRetouch, lastColor } from "@/lib/recs";
 import { addDays, daysInMonth } from "@/lib/dates";
 import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice, fmtShortDay, localParts, weekdayName, weekInitials } from "@/lib/format";
 import { fill, getDict, LOCALE, localCategory, localized, MONEY_LOCALE, type Dict, type Lang } from "@/lib/i18n";
@@ -13,6 +14,7 @@ import { useStepHistory } from "@/lib/useStepHistory";
 import type { Trend } from "@/lib/trends";
 import BookingAvatar, { type AvatarState } from "./BookingAvatar";
 import PetalBurst from "./PetalBurst";
+import Quiz from "./Quiz";
 import RebookCard from "./RebookCard";
 import WaitlistForm from "./WaitlistForm";
 
@@ -34,7 +36,7 @@ export type Staff = { id: number; name: string };
 /** Extra que suma tiempo y precio (retirada de esmalte, nail art…). */
 export type Addon = { id: number; slug: string; name: string; description: string | null; durationMin: number; priceCents: number; category: string | null; i18n?: I18nJson };
 /** Pack: combinación de servicios ya pensada, con descuento opcional. */
-export type Pack = { id: number; slug: string; name: string; emoji: string; description: string | null; serviceSlugs: string[]; discountPercent: number; i18n?: I18nJson };
+export type Pack = { id: number; slug: string; name: string; emoji: string; description: string | null; serviceSlugs: string[]; discountPercent: number; occasion?: string | null; people?: number; featured?: boolean; i18n?: I18nJson & Partial<Record<"gl" | "en", { occasion?: string }>> };
 type Slot = { day: string; time: string; startsAt: string; available: boolean; staffIds: number[] };
 type Hold = {
   holdId: string;
@@ -175,6 +177,8 @@ export default function BookingFlow({
   const [compName, setCompName] = useState("");
   const [compDraft, setCompDraft] = useState<number[]>([]);
   const [compServices, setCompServices] = useState<Service[]>([]);
+  const [twoPick, setTwoPick] = useState<Pack | null>(null); // pack «para dos»: pide el nombre de la acompañante
+  const [twoName, setTwoName] = useState("");
 
   // Visita en horas distintas ("apart"): una cita por servicio. Si no, todos seguidos en un solo bloque.
   const [apart, setApart] = useState(false);
@@ -580,7 +584,7 @@ export default function BookingFlow({
     if (d) setMonth(d.slice(0, 7));
   }
   // Empezar con una lista de servicios (un pack, «repetir lo de la última vez»…)
-  function chooseVisit(list: Service[]) {
+  function chooseVisit(list: Service[], opts: { comp?: { name: string; services: Service[] }; addonSlugs?: string[] } = {}) {
     if (!list.length) return;
     dropHold();
     setApart(false);
@@ -588,11 +592,13 @@ export default function BookingFlow({
     setActiveLeg(0);
     setService(list[0]);
     setExtras(list.slice(1, MAX_SERVICES));
-    setAddonsT([]);
-    setCompServices([]);
-    setCompName("");
+    // extras sugeridos (p. ej. nail art en el test): solo los que existen y encajan con algún servicio
+    setAddonsT((opts.addonSlugs ?? []).map((sl) => addons.find((a) => a.slug === sl)).filter((a): a is Addon => !!a && (!a.category || list.some((x) => x.category === a.category))).map((a) => a.id));
+    setCompServices(opts.comp?.services ?? []);
+    setCompName(opts.comp?.name ?? "");
     setCompDraft([]);
     setCompOpen(false);
+    setTwoPick(null);
     setAddOpen(false);
     setSlots(null);
     setDayT(null);
@@ -603,7 +609,18 @@ export default function BookingFlow({
   const packServices = (p: Pack) => p.serviceSlugs.map((slug) => services.find((x) => x.slug === slug)).filter((x): x is Service => !!x);
   function choosePack(p: Pack) {
     const sv = packServices(p);
-    if (sv.length === p.serviceSlugs.length) chooseVisit(sv);
+    if (sv.length !== p.serviceSlugs.length) return;
+    if (p.people === 2) {
+      setTwoPick(p); // primero el nombre de la acompañante
+      return;
+    }
+    chooseVisit(sv);
+  }
+  // Pack «para dos»: los servicios del pack son tuyos y, a continuación, los mismos para tu acompañante
+  function choosePackTwo(p: Pack, name: string) {
+    const sv = packServices(p);
+    if (sv.length !== p.serviceSlugs.length || name.trim().length < 2) return;
+    chooseVisit(sv, { comp: { name: name.trim(), services: sv } });
   }
   function chooseStaff(id: number | null) {
     dropHold();
@@ -753,7 +770,7 @@ export default function BookingFlow({
     if (submitting || !allHeld || !allAcked) return;
     setSubmitting(true);
     setNotice(null);
-    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, ...(kinds.length ? { acks: [...kinds] } : {}) };
+    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, lang, ...(kinds.length ? { acks: [...kinds] } : {}) };
     try {
       const r = await fetch(apart ? "/api/bookings/batch" : "/api/bookings", {
         method: "POST",
@@ -788,7 +805,7 @@ export default function BookingFlow({
       const list = (apart ? j.bookings : [j.booking]) as Done[];
       for (const b of list) {
         saveBooking(b.code, b.token);
-        saveVisitHistory({ startsAt: b.startsAt, slugs: services.filter((s) => b.serviceName.includes(s.name)).map((s) => s.slug) });
+        saveVisitHistory({ startsAt: b.startsAt, slugs: services.filter((s) => b.serviceName.includes(s.name)).map((s) => s.slug), color: colorFromNotes(form.notes) });
       }
       allHoldsRef.current = [];
       holdRef.current = null;
@@ -833,6 +850,9 @@ export default function BookingFlow({
   const stepIndex = stepOrder.indexOf(step);
   const eligibleAddons = addons.filter((a) => !a.category || availServices.some((s) => s.category === a.category));
   const lastSlugs = history.length ? history[history.length - 1].slugs : [];
+  const retouchNow = history.length ? dueRetouch(history, services, Date.now())[0] : undefined;
+  const retouchSvc = retouchNow ? services.find((x) => x.slug === retouchNow.slug) : undefined;
+  const colorLast = lastColor(history);
   const lastServices = lastSlugs.map((slug) => services.find((s) => s.slug === slug)).filter((s): s is Service => !!s);
   const suggestions = useMemo(
     () => (apart ? [] : suggest({ have: visitServices.map((s) => s.slug), catalog: services.map((s) => s.slug), packs, maxServices: MAX_SERVICES, max: 3 })),
@@ -955,12 +975,24 @@ export default function BookingFlow({
               <>
                 <Link href="/" className="back"><ArrowLeft size={16} aria-hidden="true" /> {T.backHome}</Link>
                 <h2 className="panel__title">{T.whatDoWeDo}</h2>
+                {retouchSvc && retouchNow && (
+                  <div className="retouch" role="note">
+                    <p>⏰ {t("retouchDue", { weeks: retouchNow.weeks, service: L(retouchSvc).name })}{colorLast ? ` ${t("lastColor", { color: colorLast })}` : ""}</p>
+                    <button type="button" className="btn btn--primary btn--sm" onClick={() => chooseVisit([retouchSvc])}>{T.retouchBtn}</button>
+                  </div>
+                )}
                 {lastServices.length > 0 && (
                   <button type="button" className="repeat" onClick={() => chooseVisit(lastServices)}>
                     <span className="repeat__ico">🔁</span>
                     <span><strong>{T.repeatLast}</strong><small>{names(lastServices)}</small></span>
                   </button>
                 )}
+                <Quiz
+                  lang={lang}
+                  catalog={services.map((x) => x.slug)}
+                  addonSlugs={addons.map((x) => x.slug)}
+                  onPick={(slugs, addonSlug) => chooseVisit(slugs.map((sl) => services.find((x) => x.slug === sl)).filter((x): x is Service => !!x), { addonSlugs: addonSlug ? [addonSlug] : [] })}
+                />
                 {packs.length > 0 && (
                   <div className="packs">
                     <h3>🎁 {T.packsTitle}</h3>
@@ -969,20 +1001,29 @@ export default function BookingFlow({
                       {packs.map((p) => {
                         const sv = packServices(p);
                         if (sv.length !== p.serviceSlugs.length) return null; // algún servicio del pack ya no está disponible
-                        const full = sv.reduce((a, s) => a + s.priceCents, 0);
-                        const price = sv.reduce((a, s) => a + discounted(s.priceCents, p.discountPercent), 0);
+                        const k = p.people === 2 ? 2 : 1; // «para dos»: todo se hace dos veces
+                        const full = k * sv.reduce((a, s) => a + s.priceCents, 0);
+                        const price = k * sv.reduce((a, s) => a + discounted(s.priceCents, p.discountPercent), 0);
                         const lp = L(p);
+                        const occ = p.occasion ? (lang === "es" ? p.occasion : (p.i18n?.[lang] as { occasion?: string } | undefined)?.occasion ?? p.occasion) : null;
                         return (
                           <li key={p.id}>
-                            <button type="button" className="pack" onClick={() => choosePack(p)} aria-label={`${lp.name}: ${T.packPick}`}>
+                            <button type="button" className={`pack ${p.featured ? "pack--featured" : ""}`} onClick={() => choosePack(p)} aria-label={`${lp.name}: ${T.packPick}`}>
                               <span className="pack__emoji" aria-hidden="true">{p.emoji}</span>
                               <span className="pack__main">
+                                {(p.featured || occ || p.people === 2) && (
+                                  <span className="pack__tags">
+                                    {p.featured && <span className="pack__tag pack__tag--star">{T.packFeatured}</span>}
+                                    {occ && <span className="pack__tag">{occ}</span>}
+                                    {p.people === 2 && <span className="pack__tag">{T.packFor2Tag}</span>}
+                                  </span>
+                                )}
                                 <strong>{lp.name}</strong>
                                 {lp.description && <small>{lp.description}</small>}
-                                <em>{names(sv)}</em>
+                                <em>{names(sv)}{k === 2 ? " ×2" : ""}</em>
                               </span>
                               <span className="pack__meta">
-                                <b>{fmtDuration(sv.reduce((a, s) => a + s.durationMin, 0))}</b>
+                                <b>{fmtDuration(k * sv.reduce((a, s) => a + s.durationMin, 0))}</b>
                                 {p.discountPercent > 0 ? (
                                   <>
                                     <s>{money(full)}</s>
@@ -994,6 +1035,19 @@ export default function BookingFlow({
                                 )}
                               </span>
                             </button>
+                            {twoPick?.id === p.id && (
+                              <form className="pack-two" onSubmit={(e) => { e.preventDefault(); choosePackTwo(p, twoName); }}>
+                                <label className="field">
+                                  <span>{T.packTwoName}</span>
+                                  <input required minLength={2} maxLength={40} value={twoName} onChange={(e) => setTwoName(e.target.value)} autoComplete="off" />
+                                </label>
+                                <p className="muted small">{T.packTwoSub}</p>
+                                <div className="pack-two__row">
+                                  <button type="submit" className="btn btn--primary btn--sm">{T.packTwoGo}</button>
+                                  <button type="button" className="resp__link" onClick={() => setTwoPick(null)}>{T.close}</button>
+                                </div>
+                              </form>
+                            )}
                           </li>
                         );
                       })}
@@ -1539,7 +1593,7 @@ export default function BookingFlow({
         lang={lang}
         trends={trends}
         services={services.map((s) => ({ slug: s.slug, name: L(s).name, category: localCategory(s.category, lang), durationMin: s.durationMin, priceCents: s.priceCents }))}
-        packs={packs.map((p) => ({ slug: p.slug, name: L(p).name, serviceSlugs: p.serviceSlugs, discountPercent: p.discountPercent }))}
+        packs={packs.map((p) => ({ slug: p.slug, name: L(p).name, serviceSlugs: p.serviceSlugs, discountPercent: p.discountPercent, people: p.people }))}
         selected={visitServices.map((x) => x.slug)}
         step={step}
         address={address}

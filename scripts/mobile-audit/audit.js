@@ -83,8 +83,10 @@ function auditInPage() {
     if (v.pageOverflow) byPage[name].pageOverflow.add(`${vp}: ${v.pageOverflow}`);
     for (const key of ["overflow", "tap", "smallText", "inputFont", "clippedText"]) for (const x of v[key]) byPage[name][key].add(x.replace(/ \d+×\d+$/, (m) => m) + (key === "overflow" ? ` [${vp}]` : ""));
   }
+  let totalPages = 0;
   for (const [name, v] of Object.entries(byPage)) {
     const n = v.pageOverflow.size + v.overflow.size + v.tap.size + v.smallText.size + v.inputFont.size + v.clippedText.size;
+    totalPages += n;
     console.log(`\n=== ${name}: ${n} avisos`);
     for (const key of ["pageOverflow", "overflow", "tap", "smallText", "inputFont", "clippedText"]) {
       const arr = [...v[key]];
@@ -94,4 +96,6 @@ function auditInPage() {
       if (arr.length > 14) console.log(`     … y ${arr.length - 14} más`);
     }
   }
+  console.log(`\nPANTALLAS: ${totalPages} avisos en ${Object.keys(byPage).length} pantallas`);
+  if (totalPages > 0) process.exitCode = 1; // que la auditoría falle si alguna pantalla tiene avisos
 })();

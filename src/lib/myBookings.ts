@@ -34,7 +34,7 @@ export function saveBooking(code: string, token: string): void {
 import { localParts } from "./format";
 
 const HKEY = "pd_visits";
-export type VisitRecord = { startsAt: string; slugs: string[] };
+export type VisitRecord = { startsAt: string; slugs: string[]; color?: string };
 
 export function loadVisitHistory(): VisitRecord[] {
   try {

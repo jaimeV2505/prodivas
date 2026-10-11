@@ -637,6 +637,247 @@ try {
       }
     }
 
+    /* 3g ------------------------------------------------------------- */
+    section("3g. Cancelaciones: rescate, motivo, plazo por servicio, ceder la cita, cancelar todas y cita por mover");
+    {
+      const svc = (await db.query(`SELECT id, duration_min FROM services WHERE active ORDER BY sort, id LIMIT 1`)).rows[0];
+      const slotsOf = async (offset, span = 12) => ((await api(`/api/availability?serviceIds=${svc.id}&from=${addDays(from, offset)}&to=${addDays(from, offset + span)}`)).json?.slots ?? []).filter((x) => x.available);
+      const book = async (startsAt, phone) => {
+        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [svc.id], staffId: null, startsAt } });
+        const c = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone } });
+        return c.json?.booking;
+      };
+      const free = await slotsOf(3);
+      const b1 = free[0] && (await book(free[0].startsAt, "600000010"));
+      if (!b1) check(false, "se pudo crear una cita para probar las cancelaciones");
+      else {
+        // rescate: hasta 3 huecos, nunca la hora actual, y mover con un toque funciona
+        const alt = await api(`/api/bookings/${b1.code}/alternatives?t=${b1.token}`);
+        const list = alt.json?.alternatives ?? [];
+        check(alt.status === 200 && list.length >= 1 && list.length <= 3 && !list.some((a) => new Date(a.startsAt).getTime() === new Date(b1.startsAt).getTime()), "«¿mejor la movemos?» propone hasta 3 huecos y nunca la hora actual", JSON.stringify(list.map((a) => a.startsAt)));
+        const bad = await api(`/api/bookings/${b1.code}/alternatives?t=${"x".repeat(40)}`);
+        check(bad.status === 404, "sin el enlace correcto no se ven las alternativas", String(bad.status));
+        if (list[0]) {
+          const mv = await api(`/api/bookings/${b1.code}/reschedule`, { method: "POST", body: { token: b1.token, startsAt: list[0].startsAt } });
+          check(mv.status === 200 && new Date(mv.json?.booking?.startsAt).getTime() === new Date(list[0].startsAt).getTime(), "mover a una de las alternativas funciona", String(mv.status));
+        }
+        // ceder la cita: cambia de persona y de enlace
+        const same = await api(`/api/bookings/${b1.code}/transfer`, { method: "POST", body: { token: b1.token, name: "Otra Persona", phone: "600000010" } });
+        check(same.status === 400, "no se puede ceder la cita al mismo teléfono", String(same.status));
+        const tr = await api(`/api/bookings/${b1.code}/transfer`, { method: "POST", body: { token: b1.token, name: "Ana Cedida", phone: "600000011" } });
+        const row = (await db.query(`SELECT customer_name, customer_phone, hold_token FROM bookings WHERE code = $1`, [b1.code])).rows[0];
+        check(tr.status === 200 && row?.customer_name === "Ana Cedida" && row.customer_phone.replace(/\D/g, "").endsWith("600000011") && row.hold_token !== b1.token, "ceder la cita cambia la persona y el enlace", JSON.stringify(row));
+        const old = await api(`/api/bookings/${b1.code}/alternatives?t=${b1.token}`);
+        check(old.status === 404, "el enlace anterior deja de valer tras ceder la cita", String(old.status));
+        // cancelar con motivo
+        const cx = await api("/api/respond", { method: "POST", body: { code: b1.code, token: row.hold_token, action: "cancel", why: "sick" } });
+        const after = (await db.query(`SELECT status, cancel_why, cancel_reason FROM bookings WHERE code = $1`, [b1.code])).rows[0];
+        check(cx.status === 200 && after?.status === "CANCELLED" && after.cancel_why === "sick", "al cancelar se guarda el motivo", JSON.stringify(after));
+      }
+
+      // plazo por servicio: con 168 h, una cita dentro de 3 días ya cuenta como «tarde» (se permite, pero se anota)
+      const free2 = await slotsOf(3);
+      if (free2[0]) {
+        await db.query(`UPDATE services SET cancel_notice_hours = 168 WHERE id = $1`, [svc.id]);
+        try {
+          const b2 = await book(free2[0].startsAt, "600000012");
+          const c2 = await api("/api/respond", { method: "POST", body: { code: b2.code, token: b2.token, action: "cancel" } });
+          const r2 = (await db.query(`SELECT cancel_reason FROM bookings WHERE code = $1`, [b2.code])).rows[0];
+          check(c2.status === 200 && /_late$/.test(r2?.cancel_reason ?? ""), "con un plazo propio de 168 h, cancelar a 3 días cuenta como tarde (pero se permite)", JSON.stringify(r2));
+        } finally {
+          await db.query(`UPDATE services SET cancel_notice_hours = NULL WHERE id = $1`, [svc.id]);
+        }
+        const free3 = await slotsOf(4);
+        const b3 = free3[0] && (await book(free3[0].startsAt, "600000012"));
+        if (b3) {
+          const c3 = await api("/api/respond", { method: "POST", body: { code: b3.code, token: b3.token, action: "cancel" } });
+          const r3 = (await db.query(`SELECT cancel_reason FROM bookings WHERE code = $1`, [b3.code])).rows[0];
+          check(c3.status === 200 && !/_late$/.test(r3?.cancel_reason ?? ""), "con la regla general (24 h), cancelar a 4 días no es tarde", JSON.stringify(r3));
+        }
+      }
+
+      // cancelar todas las citas de una visita en horas distintas
+      const fd = await slotsOf(3, 14);
+      const dA = fd[0], dB = fd.find((x) => x.day !== dA?.day && x.day > dA.day);
+      if (dA && dB) {
+        const h1 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [svc.id], staffId: null, startsAt: dA.startsAt } });
+        const h2 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [svc.id], staffId: null, startsAt: dB.startsAt, extend: [{ holdId: h1.json?.holdId, holdToken: h1.json?.holdToken }] } });
+        const g = await api("/api/bookings/batch", { method: "POST", body: { legs: [{ holdId: h1.json?.holdId, holdToken: h1.json?.holdToken }, { holdId: h2.json?.holdId, holdToken: h2.json?.holdToken }], name: "E2E Test", phone: "600000013" } });
+        const legs = g.json?.bookings ?? [];
+        if (legs.length === 2) {
+          const ca = await api(`/api/bookings/${legs[0].code}/cancel-all`, { method: "POST", body: { token: legs[0].token, why: "work" } });
+          const st = (await db.query(`SELECT status, cancel_why FROM bookings WHERE code = ANY($1::text[])`, [legs.map((l) => l.code)])).rows;
+          check(ca.status === 200 && ca.json?.cancelled === 2 && st.every((r) => r.status === "CANCELLED" && r.cancel_why === "work"), "«cancelar todas» cancela las dos citas de la visita", JSON.stringify(st));
+        } else check(false, "se pudo crear una visita en horas distintas para probar «cancelar todas»", JSON.stringify(g.json));
+      }
+
+      // cita por mover (cerrar el día): sin plazo para cambiarla, aunque falten pocas horas
+      const staff1 = (await db.query(`SELECT id FROM staff WHERE active ORDER BY sort, id LIMIT 1`)).rows[0].id;
+      const target = (await slotsOf(3))[0];
+      if (target) {
+        const code = `E2EC${Date.now() % 1000000}`;
+        const tok = "e2e-token-" + "a".repeat(40);
+        await db.query(
+          `INSERT INTO bookings (code, staff_id, service_id, starts_at, ends_at, status, hold_token, customer_name, customer_phone, confirmed_at)
+           VALUES ($1, $2, $3, now() + interval '6 hours', now() + interval '6 hours' + make_interval(mins => $4::int), 'CONFIRMED', $5, 'E2E Test', '600000014', now())`,
+          [code, staff1, svc.id, svc.duration_min, tok],
+        );
+        const late = await api(`/api/bookings/${code}/reschedule`, { method: "POST", body: { token: tok, startsAt: target.startsAt } });
+        check(late.status === 409 && late.json?.error?.code === "TOO_LATE", "faltando 6 h, la clienta no puede cambiar la hora online (plazo normal)", `${late.status} ${late.json?.error?.code}`);
+        await db.query(`UPDATE bookings SET reschedule_free = true, centre_note = 'Prueba' WHERE code = $1`, [code]);
+        const free4 = await api(`/api/bookings/${code}/reschedule`, { method: "POST", body: { token: tok, startsAt: target.startsAt } });
+        const fl = (await db.query(`SELECT reschedule_free, centre_note FROM bookings WHERE code = $1`, [code])).rows[0];
+        check(free4.status === 200 && fl.reschedule_free === false && fl.centre_note === null, "si el centro pidió moverla, se puede cambiar sin plazo y se limpia la marca", `${free4.status} ${JSON.stringify(fl)}`);
+      }
+    }
+
+    /* 3h ------------------------------------------------------------- */
+    section("3h. Notificaciones: idioma por cita, recordatorio de la víspera, valoración privada, baja y después de la visita");
+    {
+      const { createHmac } = await import("node:crypto");
+      const svc = (await db.query(`SELECT id, duration_min FROM services WHERE active ORDER BY sort, id LIMIT 1`)).rows[0];
+      const staff1 = (await db.query(`SELECT id FROM staff WHERE active ORDER BY sort, id LIMIT 1`)).rows[0].id;
+      const hourNow = Number(new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", hour12: false }).format(new Date())) % 24;
+      const cron = () => (process.env.CRON_SECRET ? fetch(BASE + "/api/cron/reminders", { headers: { authorization: `Bearer ${process.env.CRON_SECRET}` } }).then((r) => r.json()).catch(() => null) : Promise.resolve(null));
+      const insert = async (o) => {
+        const code = `E2EN${Math.floor(Math.random() * 1e6)}`;
+        await db.query(
+          `INSERT INTO bookings (code, staff_id, service_id, starts_at, ends_at, status, hold_token, customer_name, customer_phone, confirmed_at, customer_response, reminder_prev_sent_at, customer_id, attendance)
+           VALUES ($1, $2, $3, ${o.start}, ${o.start} + make_interval(mins => $4::int), 'CONFIRMED', $5, 'E2E Test', $6, ${o.confirmed ?? "now() - interval '3 days'"}, $7, $8, $9, $10)`,
+          [code, staff1, svc.id, svc.duration_min, "e2e-token-" + "b".repeat(40), o.phone ?? "600000014", o.response ?? null, o.prevSent ?? null, o.customerId ?? null, o.attendance ?? null],
+        );
+        return { code, token: "e2e-token-" + "b".repeat(40), ...(await db.query(`SELECT id FROM bookings WHERE code = $1`, [code])).rows[0] };
+      };
+      const today = `(((now() AT TIME ZONE '${TZ}')::date)`;
+      const at = (hhmm) => `(${today} + time '${hhmm}') AT TIME ZONE '${TZ}')`;
+
+      // 1) el idioma de la clienta se guarda en la cita (y uno inventado se rechaza)
+      const sl = ((await api(`/api/availability?serviceIds=${svc.id}&from=${addDays(from, 5)}&to=${addDays(from, 12)}`)).json?.slots ?? []).find((x) => x.available);
+      if (sl) {
+        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [svc.id], staffId: null, startsAt: sl.startsAt } });
+        const bad = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014", lang: "fr" } });
+        check(bad.status === 400, "un idioma inventado se rechaza", String(bad.status));
+        const ok = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014", lang: "gl" } });
+        const row = (await db.query(`SELECT lang FROM bookings WHERE id = $1`, [h.json?.holdId])).rows[0];
+        check(ok.status === 200 && row?.lang === "gl", "el idioma elegido (gallego) queda guardado en la cita", JSON.stringify(row));
+        if (ok.json?.booking) await api("/api/respond", { method: "POST", body: { code: ok.json.booking.code, token: ok.json.booking.token, action: "cancel" } });
+      }
+
+      // 2) recordatorio de la víspera: solo a quien toca (se comprueba a través del cron real)
+      if (process.env.CRON_SECRET && hourNow >= 8 && hourNow < 15) {
+        const A = await insert({ start: at("21:00") });                                  // toca
+        const B = await insert({ start: at("21:45"), response: "CONFIRMED" });           // ya confirmó
+        const C = await insert({ start: at("22:30"), confirmed: "now()" });               // reservó después de la tarde de ayer
+        const D = await insert({ start: at("23:15"), prevSent: "now()" });                // ya se le mandó
+        const r = await cron();
+        const att = Object.fromEntries((await db.query(`SELECT code, reminder_prev_attempts AS n FROM bookings WHERE id = ANY($1::uuid[])`, [[A.id, B.id, C.id, D.id]])).rows.map((x) => [x.code, x.n]));
+        check(r?.ok === true, "el cron responde", JSON.stringify(r));
+        check(att[A.code] >= 1 && att[B.code] === 0 && att[C.code] === 0 && att[D.code] === 0, "la víspera solo se avisa a quien no ha confirmado, reservó antes de la tarde y no tenía ya el aviso", JSON.stringify(att));
+      } else check(true, "(recordatorio de la víspera: se omite fuera de 08:00–15:00 o sin CRON_SECRET)");
+
+      // 3) valoración privada
+      const past = await insert({ start: `now() - interval '30 hours'`, attendance: "SHOWED" });
+      const fut = await insert({ start: `now() + interval '300 hours'` });
+      const rv = (b, body) => api(`/api/bookings/${b.code}/review`, { method: "POST", body: { token: b.token, ...body } });
+      check((await rv(past, { rating: 6 })).status === 400, "una nota de 6 estrellas se rechaza");
+      check((await rv(fut, { rating: 5 })).status === 400, "no se puede valorar una cita que aún no ha pasado");
+      check((await api(`/api/bookings/${past.code}/review`, { method: "POST", body: { token: "x".repeat(30), rating: 5 } })).status === 404, "sin el enlace correcto no se puede valorar");
+      check((await rv(past, { rating: 2 })).status === 200, "una valoración de 2 estrellas se guarda");
+      await rv(past, { comment: "Esperé mucho." });
+      await rv(past, { googleClicked: true });
+      const rev = (await db.query(`SELECT rating, comment, google_clicked FROM reviews WHERE booking_id = $1`, [past.id])).rows[0];
+      check(rev?.rating === 2 && rev.comment === "Esperé mucho." && rev.google_clicked === true, "la nota, el comentario privado y el clic a Google quedan guardados", JSON.stringify(rev));
+      await rv(past, { rating: 4 });
+      check((await db.query(`SELECT count(*)::int AS n FROM reviews WHERE booking_id = $1`, [past.id])).rows[0].n === 1, "valorar otra vez no duplica: una valoración por cita");
+
+      // 4) baja de mensajes opcionales: el enlace va firmado
+      const cust = (await db.query(`SELECT id FROM customers WHERE phone_key = '600000010' LIMIT 1`)).rows[0];
+      if (cust) {
+        const key = createHmac("sha256", process.env.SESSION_SECRET || "dev-only-secret").update("optout").digest("hex").slice(0, 32);
+        const sig = (id) => createHmac("sha256", key).update(String(id)).digest("hex").slice(0, 24);
+        const forged = await api("/api/optout", { method: "POST", body: { token: `${cust.id}.${"0".repeat(24)}` } });
+        check(forged.status === 404, "un enlace de baja con firma falsa se rechaza", String(forged.status));
+        const good = await api("/api/optout", { method: "POST", body: { token: `${cust.id}.${sig(cust.id)}` } });
+        if (good.status === 404 && !process.env.SESSION_SECRET) check(true, "(baja firmada: el test no conoce SESSION_SECRET del servidor, se omite)");
+        else {
+          const o = (await db.query(`SELECT optout_at FROM customers WHERE id = $1`, [cust.id])).rows[0];
+          check(good.status === 200 && !!o?.optout_at, "con el enlace firmado la clienta queda de baja de los mensajes opcionales", String(good.status));
+          // 5) después de la visita: a quien vino se le escribe; a quien se dio de baja, no
+          if (process.env.CRON_SECRET && hourNow >= 10 && hourNow < 20) {
+            const gone = await insert({ start: `now() - interval '54 hours'`, attendance: "SHOWED", phone: "600000010", customerId: cust.id });
+            const other = (await db.query(`SELECT id FROM customers WHERE phone_key = '600000012' LIMIT 1`)).rows[0];
+            const stays = other ? await insert({ start: `now() - interval '56 hours'`, attendance: "SHOWED", phone: "600000012", customerId: other.id }) : null;
+            const noShow = await insert({ start: `now() - interval '58 hours'`, attendance: "NO_SHOW", phone: "600000012", customerId: other?.id ?? null });
+            await cron();
+            const q = async (b) => (await db.query(`SELECT aftercare_sent_at FROM bookings WHERE id = $1`, [b.id])).rows[0].aftercare_sent_at;
+            check((await q(gone)) === null, "a quien se dio de baja no se le manda el mensaje de después de la visita");
+            if (stays) check((await q(stays)) !== null, "a quien vino y no se dio de baja sí se le manda");
+            check((await q(noShow)) === null, "a quien no vino no se le manda");
+          } else check(true, "(después de la visita: se omite fuera de 10:00–20:00 o sin CRON_SECRET)");
+          await db.query(`UPDATE customers SET optout_at = NULL WHERE id = $1`, [cust.id]);
+        }
+      }
+    }
+
+    /* 3i ------------------------------------------------------------- */
+    section("3i. Packs para dos y de temporada, y añadir un servicio a una cita ya reservada");
+    {
+      const all = (await db.query(`SELECT id, slug, duration_min, price_cents FROM services WHERE active AND consent_kind IS NULL AND deposit_cents = 0 ORDER BY sort, id`)).rows;
+      const A = all[0];
+      const free = async (ids, off = 3) => ((await api(`/api/availability?serviceIds=${ids.join(",")}&from=${addDays(from, off)}&to=${addDays(from, off + 12)}`)).json?.slots ?? []).find((x) => x.available);
+      const release = (r) => api(`/api/holds/${r.json?.holdId}?token=${r.json?.holdToken}`, { method: "DELETE" });
+      // pack «para dos»: el servicio dos veces con descuento
+      await db.query(`INSERT INTO packages (slug, name, service_slugs, discount_percent, people) VALUES ('e2e-dos', 'E2E para dos', ARRAY[$1], 20, 2) ON CONFLICT (slug) DO UPDATE SET active = true, discount_percent = 20, people = 2, starts_on = NULL, ends_on = NULL`, [A.slug]);
+      try {
+        const sl = await free([A.id, A.id]);
+        if (sl) {
+          const hold = (body) => api("/api/holds", { method: "POST", ip: freshIp(), body: { staffId: null, startsAt: sl.startsAt, ...body } });
+          const two = await hold({ serviceIds: [A.id, A.id], packageSlug: "e2e-dos" });
+          check(two.status === 200 && two.json?.priceCents === 2 * Math.round(A.price_cents * 0.8), "un pack «para dos» aplica el descuento a los dos servicios", `${two.json?.priceCents} vs ${2 * Math.round(A.price_cents * 0.8)}`);
+          await release(two);
+          const one = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], packageSlug: "e2e-dos", staffId: null, startsAt: sl.startsAt } });
+          check(one.status === 200 && one.json?.priceCents === A.price_cents, "con el servicio una sola vez no hay descuento del pack para dos", String(one.json?.priceCents));
+          await release(one);
+          // de temporada: fuera de fechas, no se aplica (aunque se pida)
+          await db.query(`UPDATE packages SET ends_on = (now() AT TIME ZONE $1)::date - 1 WHERE slug = 'e2e-dos'`, [TZ]);
+          const old = await hold({ serviceIds: [A.id, A.id], packageSlug: "e2e-dos" });
+          check(old.status === 200 && old.json?.priceCents === 2 * A.price_cents, "un pack de temporada caducado ya no aplica descuento", String(old.json?.priceCents));
+          await release(old);
+          await db.query(`UPDATE packages SET starts_on = (now() AT TIME ZONE $1)::date + 30, ends_on = NULL WHERE slug = 'e2e-dos'`, [TZ]);
+          const early = await hold({ serviceIds: [A.id, A.id], packageSlug: "e2e-dos" });
+          check(early.status === 200 && early.json?.priceCents === 2 * A.price_cents, "ni uno que todavía no ha empezado", String(early.json?.priceCents));
+          await release(early);
+        }
+      } finally {
+        await db.query(`DELETE FROM packages WHERE slug = 'e2e-dos'`);
+      }
+
+      // añadir un servicio a una cita ya reservada
+      const slB = await free([A.id], 4);
+      if (slB) {
+        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: null, startsAt: slB.startsAt } });
+        const c = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014" } });
+        const b = c.json?.booking;
+        if (!b) check(false, "se pudo crear una cita para probar «añadir un servicio»", JSON.stringify(c.json));
+        else {
+          const lst = await api(`/api/bookings/${b.code}/extras?t=${b.token}`);
+          const options = lst.json?.services ?? [];
+          check(lst.status === 200 && Array.isArray(options) && options.every((o) => o.id !== A.id), "se listan servicios que caben a continuación (nunca el que ya lleva)", JSON.stringify(options.map((o) => o.name)));
+          check((await api(`/api/bookings/${b.code}/extras?t=${"x".repeat(30)}`)).status === 404, "sin el enlace correcto no se ve la lista");
+          if (options[0]) {
+            const before = (await db.query(`SELECT ends_at FROM bookings WHERE id = $1`, [b.id])).rows[0].ends_at;
+            const add = await api(`/api/bookings/${b.code}/extras`, { method: "POST", body: { token: b.token, serviceId: options[0].id } });
+            const row = (await db.query(`SELECT ends_at, blocked_until, (SELECT count(*)::int FROM booking_services WHERE booking_id = $1) AS n, (SELECT SUM(price_cents)::int FROM booking_services WHERE booking_id = $1) AS total FROM bookings WHERE id = $1`, [b.id])).rows[0];
+            check(add.status === 200 && row.n === 2 && new Date(row.ends_at) - new Date(before) === options[0].durationMin * 60000, "añadir el servicio alarga la cita justo lo que dura y suma su fila", JSON.stringify(row));
+            check(row.total === A.price_cents + options[0].priceCents, "y el precio de la cita suma el del servicio añadido", String(row.total));
+            const again = await api(`/api/bookings/${b.code}/extras`, { method: "POST", body: { token: b.token, serviceId: options[0].id } });
+            check(again.status === 409, "no se puede añadir dos veces el mismo servicio", String(again.status));
+          } else check(true, "(no cabe ningún servicio a continuación de esa cita: se omite el alta)");
+          await api("/api/respond", { method: "POST", body: { code: b.code, token: b.token, action: "cancel" } });
+        }
+      }
+    }
+
     /* 4 -------------------------------------------------------------- */
     section("4. Carrera: seis personas pulsan el mismo hueco a la vez");
     const target = free[1];
@@ -653,7 +894,7 @@ try {
 } finally {
   await db.query(`DELETE FROM bookings WHERE customer_name = 'E2E Test'`);
   await db.query(`DELETE FROM waitlist WHERE name = 'E2E Test'`);
-  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007','600000008','600000009')`);
+  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007','600000008','600000009','600000010','600000011','600000012','600000013','600000014')`);
   await db.end();
 }
 

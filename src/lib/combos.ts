@@ -11,7 +11,7 @@ export const PAIR_RULES: { when: RegExp; then: string[]; reason: PairReason }[] 
   { when: /cejas|microblading/, then: ["lifting-pestanas"], reason: "pairLashes" },
 ];
 
-export type PackLike = { slug: string; serviceSlugs: string[]; discountPercent: number };
+export type PackLike = { slug: string; serviceSlugs: string[]; discountPercent: number; people?: number };
 export type Suggestion =
   | { key: string; kind: "pack"; add: string[]; packSlug: string; percent: number }
   | { key: string; kind: "pair"; add: string[]; reason: PairReason };
@@ -26,6 +26,7 @@ export function suggest(o: { have: string[]; catalog: string[]; packs: PackLike[
 
   // 1) packs que ya empiezas a formar: todo lo que llevas está en el pack y faltan servicios
   for (const p of o.packs) {
+    if ((p.people ?? 1) !== 1) continue; // los packs para dos no se «completan» servicio a servicio
     if (!o.have.every((s) => p.serviceSlugs.includes(s))) continue;
     const missing = p.serviceSlugs.filter((s) => !have.has(s));
     if (!missing.length || !missing.every((s) => exists.has(s))) continue;
@@ -48,10 +49,13 @@ export function suggest(o: { have: string[]; catalog: string[]; packs: PackLike[
   return out.slice(0, o.max ?? 3);
 }
 
-/** ¿Los servicios elegidos son EXACTAMENTE los de algún pack? (el servidor aplica la misma regla) */
-export function matchPack<T extends { serviceSlugs: string[] }>(have: string[], packs: T[]): T | null {
-  const h = new Set(have);
-  return packs.find((p) => p.serviceSlugs.length === have.length && p.serviceSlugs.length === h.size && p.serviceSlugs.every((s) => h.has(s))) ?? null;
+/** Servicios que lleva un pack: los suyos, dos veces si es «para dos» (ella y su acompañante). */
+export const packExpanded = (p: { serviceSlugs: string[]; people?: number }): string[] => (p.people === 2 ? [...p.serviceSlugs, ...p.serviceSlugs] : [...p.serviceSlugs]);
+
+/** ¿Los servicios elegidos son EXACTAMENTE los de algún pack? (el servidor aplica la misma regla; cuenta cuántas veces se repite cada uno) */
+export function matchPack<T extends { serviceSlugs: string[]; people?: number }>(have: string[], packs: T[]): T | null {
+  const h = [...have].sort().join("|");
+  return packs.find((p) => packExpanded(p).sort().join("|") === h) ?? null;
 }
 
 /** Precio de un servicio con el descuento del pack (mismo redondeo que el servidor). */

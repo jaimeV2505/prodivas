@@ -10,7 +10,7 @@ import type { Trend } from "./trends";
  * idioma de la clienta. Si no entiende algo, lo dice y ofrece el teléfono.
  */
 export type DivaService = { slug: string; name: string; category: string; durationMin: number; priceCents: number };
-export type DivaPack = { slug: string; name: string; serviceSlugs: string[]; discountPercent: number };
+export type DivaPack = { slug: string; name: string; serviceSlugs: string[]; discountPercent: number; people?: number };
 export type DivaCtx = { lang: Lang; trends: Trend[]; services: DivaService[]; packs: DivaPack[]; selected: string[]; step: string; address: string };
 export type DivaAction = { label: string; slug: string; kind: "service" | "pack" };
 export type DivaMsg = { text: string; action?: DivaAction };

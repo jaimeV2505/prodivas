@@ -20,7 +20,7 @@ type Props = {
   lang: Lang;
   trends: Trend[];
   services: { slug: string; name: string; category: string; durationMin: number; priceCents: number }[];
-  packs: { slug: string; name: string; serviceSlugs: string[]; discountPercent: number }[];
+  packs: { slug: string; name: string; serviceSlugs: string[]; discountPercent: number; people?: number }[];
   selected: string[];
   step: string;
   address: string;

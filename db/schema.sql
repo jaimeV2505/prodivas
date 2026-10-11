@@ -377,3 +377,77 @@ UPDATE trends SET i18n = '{"en":{"title":"Lash lift","body":"Open, awake eyes wi
   WHERE title = 'Lifting de pestañas' AND i18n = '{}'::jsonb;
 UPDATE trends SET i18n = '{"en":{"title":"Natural, luminous brows","body":"Natural but well-groomed brows, a little lighter and less sharply defined. Goodbye to ultra-defined brows."},"gl":{"title":"Cellas naturais e luminosas","body":"Cellas naturais pero coidadas, un pouco máis claras e menos marcadas. Adeus ás cellas ultradefinidas."}}'::jsonb
   WHERE title = 'Cejas naturales y luminosas' AND i18n = '{}'::jsonb;
+
+-- =====================================================================
+-- Cancelaciones: política por servicio, motivo, citas por mover (cerrar el día)
+-- =====================================================================
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancel_why text;                           -- sick | work | other
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reschedule_free boolean NOT NULL DEFAULT false; -- el centro pide moverla: sin plazo y sin penalización
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS centre_note text;                          -- mensaje del centro (cerrar el día)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'services' AND column_name = 'cancel_notice_hours') THEN
+    -- horas de antelación para cancelar sin perder la señal (NULL = la regla general)
+    ALTER TABLE services ADD COLUMN cancel_notice_hours int CHECK (cancel_notice_hours IS NULL OR cancel_notice_hours BETWEEN 0 AND 168);
+    UPDATE services SET cancel_notice_hours = 48 WHERE consent_kind IS NOT NULL;  -- láser y microblading: 48 h
+  END IF;
+END $$;
+
+-- =====================================================================
+-- Notificaciones: idioma por cita, recordatorio en dos pasos, después de la visita, valoraciones y baja
+-- =====================================================================
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS lang text NOT NULL DEFAULT 'es' CHECK (lang IN ('es','gl','en'));
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_prev_sent_at  timestamptz;       -- recordatorio de la víspera
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reminder_prev_attempts int NOT NULL DEFAULT 0;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS aftercare_sent_at      timestamptz;       -- gracias + cuidados + valoración
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rebook_nudge_sent_at   timestamptz;       -- «toca retoque»
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS optout_at timestamptz;                   -- «BAJA»: sin mensajes opcionales
+ALTER TABLE waitlist  ADD COLUMN IF NOT EXISTS lang text NOT NULL DEFAULT 'es' CHECK (lang IN ('es','gl','en'));
+
+-- Cuidados posteriores por servicio (texto libre en castellano; editable en /admin/ajustes)
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'services' AND column_name = 'aftercare') THEN
+    ALTER TABLE services ADD COLUMN aftercare text;
+    UPDATE services SET aftercare = 'Evita el agua muy caliente y los productos de limpieza sin guantes las primeras 24 horas. Hidrata las cutículas con aceite cada noche y no uses las uñas como herramienta.' WHERE slug IN ('manicura-semipermanente','pedicura-semipermanente');
+    UPDATE services SET aftercare = 'Evita mojar las pestañas y el vapor durante 24 horas, y no uses rizador ni máscara en ese tiempo.' WHERE slug = 'lifting-pestanas';
+    UPDATE services SET aftercare = 'Durante 7 días no mojes ni rasques la zona y aplica solo lo que te indicamos. Evita sol, sauna y piscina dos semanas.' WHERE slug = 'microblading';
+    UPDATE services SET aftercare = 'Evita el sol directo y la cabina en la zona y mantenla hidratada con una crema calmante.' WHERE slug LIKE 'laser-%';
+  END IF;
+END $$;
+
+-- Valoraciones: privadas primero; si son buenas se invita a dejarla en Google
+CREATE TABLE IF NOT EXISTS reviews (
+  id             bigserial PRIMARY KEY,
+  booking_id     uuid NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  rating         int  NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  comment        text,
+  google_clicked boolean NOT NULL DEFAULT false,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+
+-- =====================================================================
+-- Packs por ocasión, para dos, de temporada y destacados; sellos de fidelidad
+-- =====================================================================
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'packages' AND column_name = 'occasion') THEN
+    ALTER TABLE packages ADD COLUMN occasion text;                                              -- «Boda», «Camino»…: se muestra como etiqueta
+    ALTER TABLE packages ADD COLUMN people int NOT NULL DEFAULT 1 CHECK (people IN (1, 2));      -- 2 = para dos: los servicios se hacen dos veces (ella y su acompañante)
+    ALTER TABLE packages ADD COLUMN starts_on date;                                              -- de temporada: solo se ofrece entre estas fechas
+    ALTER TABLE packages ADD COLUMN ends_on date;
+    ALTER TABLE packages ADD COLUMN featured boolean NOT NULL DEFAULT false;                     -- «pack del mes»
+    -- Dos packs de ejemplo (sin descuento; los ajustas en /admin/ajustes)
+    INSERT INTO packages (slug, name, emoji, description, service_slugs, discount_percent, people, i18n, sort)
+    VALUES ('madre-e-hija', 'Madre e hija', '👩‍👧', 'Manicura clásica para las dos, una detrás de otra.', ARRAY['manicura-clasica'], 0, 2,
+      '{"en":{"name":"Mother and daughter","description":"Classic manicure for both of you, one after the other."},"gl":{"name":"Nai e filla","description":"Manicura clásica para as dúas, unha detrás da outra."}}'::jsonb, 40)
+    ON CONFLICT (slug) DO NOTHING;
+    INSERT INTO packages (slug, name, emoji, description, service_slugs, discount_percent, occasion, i18n, sort)
+    VALUES ('invitada-de-boda', 'Invitada de boda', '👗', 'Manos y pies a juego y cejas: para llegar perfecta.', ARRAY['manicura-semipermanente','pedicura-semipermanente','hilo-cejas'], 0, 'Boda',
+      '{"en":{"name":"Wedding guest","description":"Matching hands and feet plus brows: arrive looking perfect.","occasion":"Wedding"},"gl":{"name":"Invitada de voda","description":"Mans e pés a xogo e cellas: para chegar perfecta.","occasion":"Voda"}}'::jsonb, 50)
+    ON CONFLICT (slug) DO NOTHING;
+  END IF;
+END $$;
+
+-- Fidelidad: cada N visitas, un premio (se canjea a mano desde la ficha de la clienta)
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS loyalty_redeemed int NOT NULL DEFAULT 0;
+INSERT INTO settings (key, value) VALUES ('loyalty_enabled', 'off') ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('loyalty_every', '10') ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('loyalty_reward', 'una manicura clásica gratis') ON CONFLICT (key) DO NOTHING;

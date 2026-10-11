@@ -97,7 +97,7 @@ export function verifyStripeSignature(raw: string, header: string | null): boole
 export async function settleDeposit(bookingId: string, mode: "refund" | "policy" | "forfeit"): Promise<"refunded" | "forfeited" | "none" | "failed"> {
   const rows = await query<{ deposit_status: string; pi: string | null; in_time: boolean; cents: number; shared: boolean }>(
     `SELECT deposit_status, stripe_payment_intent AS pi, deposit_cents AS cents, (group_id IS NOT NULL) AS shared,
-            (starts_at - now()) >= make_interval(hours => $2::int) AS in_time
+            (starts_at - now()) >= make_interval(hours => COALESCE((SELECT MAX(s2.cancel_notice_hours) FROM booking_services bs2 JOIN services s2 ON s2.id = bs2.service_id WHERE bs2.booking_id = bookings.id), $2::int)) AS in_time
      FROM bookings WHERE id = $1::uuid`,
     [bookingId, DEPOSIT_REFUND_HOURS],
   );

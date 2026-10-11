@@ -5,6 +5,7 @@ import { logout } from "../actions";
 import { isAdmin } from "@/lib/auth";
 import { getSlotMode, SLOT_MODES, type SlotMode } from "@/lib/availability";
 import { getDepositPolicy } from "@/lib/deposit";
+import { getLoyalty } from "@/lib/loyalty";
 import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
@@ -14,6 +15,7 @@ import { derivedSecret } from "@/lib/secrets";
 import { siteUrl } from "@/lib/site";
 import {
   addAddonAction,
+  saveLoyaltyAction,
   addPackAction,
   addServiceAction,
   addStaffAction,
@@ -37,11 +39,11 @@ import {
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Ajustes", robots: { index: false, follow: false } };
 
-type Svc = { rebook_weeks: number | null; consent_kind: string | null; deposit_always: boolean; id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
+type Svc = { aftercare: string | null; cancel_notice_hours: number | null; rebook_weeks: number | null; consent_kind: string | null; deposit_always: boolean; id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
 type Hours = { weekday: number; closed: boolean; open: string | null; close: string | null; bs: string | null; be: string | null };
 type StaffHours = Hours & { staff_id: number };
 type Staff = { id: number; name: string; active: boolean };
-type PackRow = { id: number; name: string; emoji: string; description: string | null; service_slugs: string[]; discount_percent: number; active: boolean; sort: number };
+type PackRow = { occasion: string | null; people: number; starts_on: string | null; ends_on: string | null; featured: boolean; id: number; name: string; emoji: string; description: string | null; service_slugs: string[]; discount_percent: number; active: boolean; sort: number };
 type AddonRow = { id: number; name: string; description: string | null; duration_min: number; price_cents: number; category: string | null; active: boolean; sort: number };
 type TrendRow = { id: number; emoji: string; title: string; body: string; topic: string; service_slug: string | null; active: boolean; sort: number };
 const TOPIC_LABEL: Record<string, string> = { nails: "Uñas", lashes: "Pestañas", brows: "Cejas", wax: "Depilación", general: "General" };
@@ -77,8 +79,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     );
   }
 
-  const [services, hoursRows, mode, staff, staffHours, cron, trends, packs, addons, policy] = await Promise.all([
-    query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, deposit_always, rebook_weeks, consent_kind, active, sort FROM services ORDER BY active DESC, sort, id`),
+  const [services, hoursRows, mode, staff, staffHours, cron, trends, packs, addons, policy, loyalty] = await Promise.all([
+    query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, deposit_always, rebook_weeks, consent_kind, cancel_notice_hours, aftercare, active, sort FROM services ORDER BY active DESC, sort, id`),
     query<Hours>(
       `SELECT weekday, closed, to_char(open_time, 'HH24:MI') AS open, to_char(close_time, 'HH24:MI') AS close,
               to_char(break_start, 'HH24:MI') AS bs, to_char(break_end, 'HH24:MI') AS be FROM business_hours`,
@@ -91,9 +93,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     ),
     query<{ mins: number | null }>(`SELECT (EXTRACT(EPOCH FROM (now() - value::timestamptz)) / 60)::int AS mins FROM settings WHERE key = 'last_cron_run'`),
     query<TrendRow>(`SELECT id, emoji, title, body, topic, service_slug, active, sort FROM trends ORDER BY active DESC, sort, id`).catch(() => [] as TrendRow[]),
-    query<PackRow>(`SELECT id, name, emoji, description, service_slugs, discount_percent, active, sort FROM packages ORDER BY active DESC, sort, id`).catch(() => [] as PackRow[]),
+    query<PackRow>(`SELECT id, name, emoji, description, service_slugs, discount_percent, active, sort, occasion, people, to_char(starts_on, 'YYYY-MM-DD') AS starts_on, to_char(ends_on, 'YYYY-MM-DD') AS ends_on, featured FROM packages ORDER BY active DESC, featured DESC, sort, id`).catch(() => [] as PackRow[]),
     query<AddonRow>(`SELECT id, name, description, duration_min, price_cents, category, active, sort FROM addons ORDER BY active DESC, sort, id`).catch(() => [] as AddonRow[]),
     getDepositPolicy().catch(() => ({ mode: "service" as const, afterNoShows: 1, defaultCents: 1000 })),
+    getLoyalty().catch(() => ({ enabled: false, every: 10, reward: "una manicura clásica gratis" })),
   ]);
   const byDay = new Map(hoursRows.map((h) => [h.weekday, h]));
   const eur = (c: number) => (c / 100).toString().replace(".", ",");
@@ -201,8 +204,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} defaultValue={s.slot_step_min ?? ""} placeholder={String(s.duration_min)} /></label>
               <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={s.sort} /></label>
               <label className="field"><span>Retoque (semanas)</span><input name="rebook" type="number" min={1} max={26} defaultValue={s.rebook_weeks ?? ""} placeholder="—" /></label>
+              <label className="field"><span>Cancelar con (horas)</span><input name="notice" type="number" min={0} max={168} defaultValue={s.cancel_notice_hours ?? ""} placeholder={String(CONFIG.cancelNoticeHours)} /></label>
               <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue={s.consent_kind ?? ""}><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
               <label className="check"><input type="checkbox" name="deposit_always" defaultChecked={s.deposit_always} /><span>Señal siempre</span></label>
+              <label className="field field--wide"><span>Cuidados posteriores <em>(se envían tras la visita)</em></span><textarea name="aftercare" rows={2} maxLength={500} defaultValue={s.aftercare ?? ""} placeholder="Evita el agua muy caliente las primeras 24 h…" /></label>
               <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={s.active} /><span>Activo</span></label>
               <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
             </form>
@@ -220,6 +225,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} placeholder="= duración" /></label>
           <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={500} /></label>
           <label className="field"><span>Retoque (semanas)</span><input name="rebook" type="number" min={1} max={26} placeholder="—" /></label>
+          <label className="field"><span>Cancelar con (horas)</span><input name="notice" type="number" min={0} max={168} placeholder={String(CONFIG.cancelNoticeHours)} /></label>
           <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue=""><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
           <label className="check"><input type="checkbox" name="deposit_always" /><span>Señal siempre</span></label>
           <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
@@ -247,6 +253,19 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       </section>
 
       <section className="panel">
+        <h2 className="panel__title panel__title--sm">Fidelidad (sellos)</h2>
+        <p className="muted small">
+          Cada visita a la que viene suma un sello a la tarjeta de la clienta (lo ve en el enlace de su cita). Al completarla hay un premio que canjeas a mano desde su ficha en «Clientas».
+        </p>
+        <form action={saveLoyaltyAction} className="svc">
+          <label className="check"><input type="checkbox" name="enabled" defaultChecked={loyalty.enabled} /><span>Activar el programa de sellos</span></label>
+          <label className="field field--narrow"><span>Visitas por premio</span><input type="number" name="every" min={2} max={50} defaultValue={loyalty.every} /></label>
+          <label className="field field--wide"><span>Premio</span><input name="reward" maxLength={80} defaultValue={loyalty.reward} /></label>
+          <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+        </form>
+      </section>
+
+      <section className="panel">
         <h2 className="panel__title panel__title--sm">Packs</h2>
         <p className="muted small">
           Combinaciones de servicios ya pensadas que la clienta ve al principio de la reserva y que Diva recomienda. El descuento (0 = ninguno) se aplica solo si elige exactamente esos servicios.
@@ -261,7 +280,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <label className="field field--wide"><span>Descripción corta</span><input name="description" defaultValue={p.description ?? ""} maxLength={160} /></label>
               <label className="field field--narrow"><span>Descuento %</span><input type="number" name="discount" min={0} max={90} defaultValue={p.discount_percent} /></label>
               <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={p.sort} /></label>
-              <fieldset className="pack-edit"><legend>Servicios del pack</legend>
+              <label className="field"><span>Ocasión <em>(etiqueta)</em></span><input name="occasion" defaultValue={p.occasion ?? ""} maxLength={40} placeholder="Boda, Camino…" /></label>
+              <label className="field field--narrow"><span>Personas</span><select name="people" defaultValue={String(p.people)}><option value="1">1</option><option value="2">2 (para dos)</option></select></label>
+              <label className="field"><span>Desde <em>(temporada)</em></span><input type="date" name="starts_on" defaultValue={p.starts_on ?? ""} /></label>
+              <label className="field"><span>Hasta</span><input type="date" name="ends_on" defaultValue={p.ends_on ?? ""} /></label>
+              <label className="check"><input type="checkbox" name="featured" defaultChecked={p.featured} /><span>⭐ Pack destacado (el del mes)</span></label>
+              <fieldset className="pack-edit"><legend>Servicios del pack (en uno «para dos» se hacen dos veces)</legend>
                 {services.filter((x) => x.active || p.service_slugs.includes(x.slug)).map((x) => (
                   <label key={x.id} className="check"><input type="checkbox" name="services" value={x.slug} defaultChecked={p.service_slugs.includes(x.slug)} /><span>{x.name}</span></label>
                 ))}
@@ -279,7 +303,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field field--wide"><span>Descripción corta</span><input name="description" maxLength={160} /></label>
           <label className="field field--narrow"><span>Descuento %</span><input type="number" name="discount" min={0} max={90} defaultValue={0} /></label>
           <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={100} /></label>
-          <fieldset className="pack-edit"><legend>Servicios del pack (mínimo 2)</legend>
+          <label className="field"><span>Ocasión <em>(etiqueta)</em></span><input name="occasion" maxLength={40} placeholder="Boda, Camino…" /></label>
+          <label className="field field--narrow"><span>Personas</span><select name="people" defaultValue="1"><option value="1">1</option><option value="2">2 (para dos)</option></select></label>
+          <label className="field"><span>Desde <em>(temporada)</em></span><input type="date" name="starts_on" /></label>
+          <label className="field"><span>Hasta</span><input type="date" name="ends_on" /></label>
+          <label className="check"><input type="checkbox" name="featured" /><span>⭐ Pack destacado (el del mes)</span></label>
+          <fieldset className="pack-edit"><legend>Servicios del pack (mínimo 2, o 1 si es «para dos»)</legend>
             {services.filter((x) => x.active).map((x) => (
               <label key={x.id} className="check"><input type="checkbox" name="services" value={x.slug} /><span>{x.name}</span></label>
             ))}

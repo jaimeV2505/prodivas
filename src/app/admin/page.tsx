@@ -10,6 +10,7 @@ import { query } from "@/lib/db";
 import { fmtDayLabel, fmtPrice, waLink } from "@/lib/format";
 import {
   addTimeOffAction,
+  closeDayAction,
   cancelBookingAction,
   createManualAction,
   login,
@@ -44,6 +45,8 @@ type Row = {
   customer_id: number | null;
   started: boolean;
   cancel_reason: string | null;
+  reschedule_free: boolean;
+  notified: boolean | null;
   cancelled_at: string | null;
   start_iso?: string;
 };
@@ -54,7 +57,7 @@ type OffRow = { id: number; day: string; t_start: string; t_end: string; staff_n
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ d?: string; err?: string; c?: string }>;
+  searchParams: Promise<{ d?: string; err?: string; ok?: string; c?: string }>;
 }) {
   const sp = await searchParams;
 
@@ -85,7 +88,8 @@ export default async function AdminPage({
               to_char(b.starts_at AT TIME ZONE $2::text, 'HH24:MI') AS t_start,
               to_char(b.ends_at   AT TIME ZONE $2::text, 'HH24:MI') AS t_end, b.starts_at AS start_iso,
               b.customer_name, b.customer_phone, b.notes, b.customer_response, b.reminder_sent_at,
-              b.attendance, b.deposit_status, b.deposit_cents, b.customer_id, c.no_show_count AS no_shows, b.cancel_reason,
+              b.attendance, b.deposit_status, b.deposit_cents, b.customer_id, c.no_show_count AS no_shows, b.cancel_reason, b.reschedule_free,
+            (SELECT bool_or(nl.status = 'SENT') FROM notification_log nl WHERE nl.booking_id = b.id AND nl.kind = 'created' AND nl.channel IN ('whatsapp','sms','email')) AS notified,
               to_char(b.cancelled_at AT TIME ZONE $2::text, 'DD/MM HH24:MI') AS cancelled_at,
               (b.starts_at <= now() + interval '3 hours') AS started,
               COALESCE((SELECT string_agg(bs.name, ' + ' ORDER BY bs.position) FROM booking_services bs WHERE bs.booking_id = b.id), s.name) AS service_name,
@@ -137,6 +141,7 @@ export default async function AdminPage({
       <AdminNav active="dia" />
 
       {sp.err && <p className="notice notice--error" role="alert">{sp.err}</p>}
+      {sp.ok && <p className="notice notice--info" role="status">{sp.ok}</p>}
 
       <nav className="admin__days" aria-label="Cambiar de día">
         <Link className="btn btn--ghost btn--icon" href={`/admin?d=${addDays(day, -1)}`} aria-label="Día anterior">‹</Link>
@@ -190,6 +195,8 @@ export default async function AdminPage({
               {b.deposit_status === "PENDING" && <span className="badge badge--warn">Pagando señal</span>}
               {b.deposit_status === "FORFEITED" && <span className="badge badge--cancelled">Señal retenida</span>}
               {b.deposit_status === "REFUNDED" && <span className="badge badge--cancelled">Señal devuelta</span>}
+              {b.reschedule_free && b.status === "CONFIRMED" && <span className="badge badge--warn">Por mover</span>}
+              {b.status === "CONFIRMED" && b.notified === false && <span className="badge badge--noshow">Sin aviso · llámala</span>}
               {b.attendance === "SHOWED" && <span className="badge badge--ok">Vino</span>}
               {b.attendance === "NO_SHOW" && <span className="badge badge--noshow">No vino</span>}
               {b.status === "CONFIRMED" && !b.attendance && (
@@ -295,6 +302,22 @@ export default async function AdminPage({
           <label className="field field--wide"><span>Notas</span><input name="notes" maxLength={500} /></label>
           <button className="btn btn--primary" type="submit">Guardar cita</button>
         </form>
+      </section>
+
+      <section className="panel">
+        <details className="closeday">
+          <summary>🚨 Cerrar este día (enfermedad, imprevisto)</summary>
+          <p className="muted small">
+            Bloquea el día entero y deja sus citas «por mover». A cada clienta le llega un mensaje con un enlace para elegir otra hora (con propuestas) o cancelar sin coste; si pagó señal, se le devuelve.
+            Las que no contesten aparecerán aquí como «Por mover» para que las llames.
+          </p>
+          <form action={closeDayAction} className="form form--grid">
+            <label className="field"><span>Día</span><input type="date" name="day" defaultValue={day} required /></label>
+            <label className="field field--wide"><span>Mensaje para las clientas <em>(opcional)</em></span><input name="note" maxLength={160} placeholder="Estoy mala y no puedo abrir. Lo siento mucho." /></label>
+            <label className="check field--wide"><input type="checkbox" name="confirm" required /><span>Sí, cerrar el día y avisar a las clientas</span></label>
+            <button className="btn btn--primary" type="submit">Cerrar el día y avisar</button>
+          </form>
+        </details>
       </section>
 
       <section className="panel">

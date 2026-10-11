@@ -18,6 +18,7 @@ const Body = z.object({
   phone: z.string().trim().regex(/^[+\d][\d\s().-]{7,17}$/, "Escribe un teléfono válido"),
   email: z.string().trim().email("Revisa tu email").max(120).optional().or(z.literal("")),
   source: z.enum(["web", "app"]).default("web"),
+  lang: z.enum(["es", "gl", "en"]).optional(),
   website: z.string().optional(), // honeypot
 }).refine((b) => b.serviceId || b.serviceIds, "Falta el servicio");
 
@@ -33,6 +34,7 @@ export async function POST(req: NextRequest) {
       phone: b.phone,
       email: b.email || null,
       source: b.source,
+      lang: b.lang ?? "es",
       ipHash: hashIp(clientIp(req)),
     });
     if (!r.already) {

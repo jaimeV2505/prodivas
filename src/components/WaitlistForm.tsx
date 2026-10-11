@@ -32,7 +32,7 @@ export default function WaitlistForm({ serviceId, serviceIds, day, dayLabel, sou
       const r = await fetch("/api/waitlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceIds: serviceIds && serviceIds.length ? serviceIds : [serviceId], day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, website: form.website }),
+        body: JSON.stringify({ serviceIds: serviceIds && serviceIds.length ? serviceIds : [serviceId], day, part: form.part, name: form.name, phone: form.phone, email: form.email, source, lang, website: form.website }),
       });
       const j = await r.json();
       if (!r.ok) {

@@ -7,6 +7,13 @@ import { answer, nextTrend, pairingTip, spontaneous, type DivaCtx } from "../src
 import { effectiveDeposit } from "../src/lib/deposit";
 import { localParts, weekdayName } from "../src/lib/format";
 import { usualOf } from "../src/lib/myBookings";
+import { pickAlternatives } from "../src/lib/alternatives";
+import { stampsOf } from "../src/lib/loyalty";
+import { colorFromNotes, dueRetouch, lastColor } from "../src/lib/recs";
+import { quizAddon, quizResult, quizServices } from "../src/lib/quiz";
+import { inWindow, isQuiet } from "../src/lib/quiet";
+import { msgDict, msgEs, msgGl, msgEn } from "../src/lib/i18n/msg";
+import { optoutToken, parseOptoutToken } from "../src/lib/optout";
 
 let fails = 0;
 let total = 0;
@@ -65,6 +72,77 @@ check(usualOf([]) === null, "sin historial no hay «como siempre»");
 check(weekdayName(4, "es-ES") === "jueves" && weekdayName(4, "en-GB") === "Thursday", "nombre del día en cada idioma");
 
 async function main() {
+/* ---- fase 3: packs para dos, sellos, toca retoque, test ---- */
+{
+  const two = [{ slug: "madre-e-hija", serviceSlugs: ["manicura-clasica"], discountPercent: 10, people: 2 }, ...packs];
+  check(matchPack(["manicura-clasica", "manicura-clasica"], two)?.slug === "madre-e-hija", "un pack «para dos» se reconoce con el servicio dos veces");
+  check(matchPack(["manicura-clasica"], two) === null, "y con el servicio una sola vez no cuenta como pack");
+  check(matchPack(["manicura-clasica", "manicura-clasica", "manicura-clasica"], two) === null, "ni con tres");
+  check(suggest({ have: ["manicura-clasica"], catalog, packs: two, maxServices: 6 }).every((x) => x.kind !== "pack" || x.packSlug !== "madre-e-hija"), "los packs para dos no se sugieren como «completar el pack»");
+
+  check(JSON.stringify(stampsOf(7, 0, 10)) === '{"progress":7,"rewards":0}', "sellos: 7 visitas, tarjeta a 7 de 10");
+  check(JSON.stringify(stampsOf(10, 0, 10)) === '{"progress":10,"rewards":1}', "sellos: 10 visitas, tarjeta llena y 1 premio");
+  check(JSON.stringify(stampsOf(10, 1, 10)) === '{"progress":0,"rewards":0}', "sellos: tras canjear, la tarjeta empieza de cero");
+  check(JSON.stringify(stampsOf(12, 0, 10)) === '{"progress":10,"rewards":1}' && JSON.stringify(stampsOf(12, 1, 10)) === '{"progress":2,"rewards":0}', "sellos: las visitas de más cuentan para la siguiente tarjeta");
+  check(stampsOf(25, 0, 10).rewards === 2, "sellos: dos premios acumulados si no los canjea");
+
+  const wk = (n: number) => new Date(Date.now() - n * 7 * 86400000).toISOString();
+  const svcs = [{ slug: "manicura-semipermanente", rebookWeeks: 3 }, { slug: "lifting-pestanas", rebookWeeks: 6 }, { slug: "manicura-clasica", rebookWeeks: null }];
+  check(dueRetouch([{ startsAt: wk(3), slugs: ["manicura-semipermanente"] }], svcs, Date.now())[0]?.weeks === 3, "toca retoque: a las 3 semanas de una manicura semipermanente");
+  check(dueRetouch([{ startsAt: wk(2), slugs: ["manicura-semipermanente"] }], svcs, Date.now())[0]?.weeks === 2, "toca retoque: ya a falta de una semana");
+  check(dueRetouch([{ startsAt: wk(1), slugs: ["manicura-semipermanente"] }], svcs, Date.now()).length === 0, "todavía no: a la semana no toca");
+  check(dueRetouch([{ startsAt: wk(3), slugs: ["manicura-clasica"] }], svcs, Date.now()).length === 0, "un servicio sin retoque nunca lo pide");
+  check(dueRetouch([{ startsAt: wk(3), slugs: ["manicura-semipermanente"] }, { startsAt: new Date(Date.now() + 3 * 86400000).toISOString(), slugs: ["manicura-semipermanente"] }], svcs, Date.now()).length === 0, "si ya tiene otra cita futura con él, no insiste");
+  check(dueRetouch([{ startsAt: wk(40), slugs: ["manicura-semipermanente"] }], svcs, Date.now()).length === 0, "pasadas más de 26 semanas, ya no (no es un retoque)");
+  check(lastColor([{ startsAt: "2026-09-01T10:00:00Z", slugs: [], color: "Burdeos" }, { startsAt: "2026-10-01T10:00:00Z", slugs: [], color: "Rosa chicle" }, { startsAt: "2026-10-05T10:00:00Z", slugs: [] }]) === "Rosa chicle", "último color elegido: el más reciente que tenga");
+  check(colorFromNotes("Color: Rosa chicle") === "Rosa chicle" && colorFromNotes("Acompañante: Ana\nColor: Burdeos\nAlergia") === "Burdeos" && colorFromNotes("sin color") === undefined, "el color se saca de los comentarios de la cita");
+
+  check(quizResult({ time: "short", style: "natural", last: "event" }) === "quick", "test: poco tiempo y para hoy → clásica y rápida");
+  check(quizResult({ time: "normal", style: "classic", last: "weeks" }) === "daily", "test: una hora y 2–3 semanas → semipermanente de diario");
+  check(quizResult({ time: "long", style: "natural", last: "weeks" }) === "pair" && quizResult({ time: "normal", style: "natural", last: "max" }) === "pair", "test: con tiempo o buscando que dure → manos y pies");
+  check(quizResult({ time: "long", style: "bold", last: "max" }) === "full" && quizResult({ time: "short", style: "bold", last: "max" }) === "daily", "test: look completo solo con tiempo, atrevida y que dure");
+  check(quizAddon({ time: "long", style: "bold", last: "max" }) === "nail-art-sencillo" && quizAddon({ time: "long", style: "natural", last: "max" }) === null, "test: las atrevidas suman nail art");
+  check(quizServices("full", ["manicura-clasica"]).join() === "manicura-clasica" && quizServices("pair", catalog).length === 2, "test: si falta un servicio se omite; si no queda ninguno, el primero del catálogo");
+}
+
+/* ---- mensajes a la clienta: mismos textos y mismos huecos en los tres idiomas ---- */
+{
+  const k = Object.keys(msgEs) as (keyof typeof msgEs)[];
+  const ph2 = (t: string) => (t.match(/\{\w+\}/g) ?? []).sort().join(",");
+  check(k.every((x) => x in msgGl && x in msgEn), `los mensajes tienen las ${k.length} mismas claves en castellano, gallego e inglés`);
+  check(k.every((x) => ph2(msgEs[x]) === ph2((msgGl as Record<string, string>)[x]) && ph2(msgEs[x]) === ph2((msgEn as Record<string, string>)[x])), "los huecos {x} de los mensajes coinciden en los tres idiomas", k.filter((x) => ph2(msgEs[x]) !== ph2((msgEn as Record<string, string>)[x]) || ph2(msgEs[x]) !== ph2((msgGl as Record<string, string>)[x])).join(", "));
+  check(msgDict("gl").remSms !== msgDict("es").remSms && msgDict("en").remSms !== msgDict("es").remSms, "el recordatorio sale distinto en cada idioma");
+  check(k.filter((x) => x.endsWith("Sms")).every((x) => !/[áéíóúñ¿¡€]/i.test(msgEs[x])), "los SMS en castellano van sin tildes (un segmento más barato)", k.filter((x) => x.endsWith("Sms") && /[áéíóúñ¿¡€]/i.test(msgEs[x])).join(", "));
+}
+
+/* ---- horas de silencio ---- */
+check(isQuiet(23, 22, 8) && isQuiet(0, 22, 8) && isQuiet(7, 22, 8), "22:00–08:00: de noche no se envían recordatorios");
+check(!isQuiet(8, 22, 8) && !isQuiet(12, 22, 8) && !isQuiet(21, 22, 8), "y a las 08:00, a mediodía y a las 21:00 sí");
+check(!isQuiet(3, 8, 8) && isQuiet(13, 12, 15) && !isQuiet(15, 12, 15), "los límites son [inicio, fin) y se puede cambiar el horario");
+check(inWindow(10, 10, 20) && inWindow(19, 10, 20) && !inWindow(20, 10, 20) && !inWindow(9, 10, 20), "los mensajes opcionales solo salen entre las 10:00 y las 20:00");
+
+/* ---- baja firmada ---- */
+{
+  const t = optoutToken(42);
+  check(parseOptoutToken(t) === 42, "el enlace de baja firmado se reconoce");
+  check(parseOptoutToken(t.replace(/^42\./, "43.")) === null, "no se puede dar de baja a otra clienta cambiando el número");
+  check(parseOptoutToken("42.aaaaaaaaaaaaaaaaaaaaaaaa") === null && parseOptoutToken("x") === null && parseOptoutToken("") === null, "una firma falsa o un texto raro se rechazan");
+}
+
+/* ---- «¿mejor la movemos?»: los 3 huecos más parecidos ---- */
+{
+  const mk = (day: string, hhmm: string) => ({ startsAt: `${day}T${hhmm}:00Z`, day, minutes: Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3)) });
+  const orig = mk("2026-10-22", "16:00");
+  const free = [mk("2026-10-22", "16:00"), mk("2026-10-22", "17:00"), mk("2026-10-22", "10:00"), mk("2026-10-23", "16:00"), mk("2026-10-23", "11:00"), mk("2026-10-24", "16:30"), mk("2026-11-20", "16:00")];
+  const alt = pickAlternatives(free, orig, 3);
+  check(alt.length === 3 && !alt.some((a) => a.startsAt === orig.startsAt), "propone 3 huecos y nunca la hora que ya tiene");
+  check(new Set(alt.map((a) => a.day)).size === 3, "los propone en días distintos si es posible", alt.map((a) => a.day).join(","));
+  check(alt[0].startsAt === "2026-10-22T17:00:00Z" && !alt.some((a) => a.day === "2026-11-20"), "elige los más cercanos en el calendario y a hora parecida", alt.map((a) => a.startsAt).join(","));
+  const same = pickAlternatives([mk("2026-10-22", "17:00"), mk("2026-10-22", "18:00"), mk("2026-10-22", "10:00")], orig, 3);
+  check(same.length === 3, "si solo hay un día libre, completa con más horas de ese día");
+  check(pickAlternatives([mk("2026-10-22", "16:00")], orig, 3).length === 0, "si no hay otros huecos, no propone nada");
+}
+
 /* ---- señal inteligente: solo a quien ya ha faltado (con un «base de datos» de mentira) ---- */
 type Row = Record<string, unknown>;
 function fakeRunner(settings: Record<string, string>, noShows: number | null, svcDeposit: number) {

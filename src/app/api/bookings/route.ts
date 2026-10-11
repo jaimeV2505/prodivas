@@ -18,6 +18,7 @@ const Body = z.object({
   email: z.string().trim().email("Revisa tu email").max(120).optional().or(z.literal("")),
   notes: z.string().trim().max(500).optional(),
   acks: z.array(z.enum(["laser", "microblading"])).max(4).optional(), // casillas de seguridad marcadas
+  lang: z.enum(["es", "gl", "en"]).optional(), // idioma de los mensajes
   website: z.string().optional(), // honeypot: las personas no lo ven ni lo rellenan
 });
 
@@ -33,6 +34,7 @@ export async function POST(req: NextRequest) {
       email: b.email || null,
       notes: b.notes || null,
       acks: b.acks,
+      lang: b.lang,
     });
     // Con señal pendiente se devuelve el enlace de pago; los avisos salen cuando Stripe confirma el pago
     if (r.checkoutUrl) return { booking: r.booking, checkoutUrl: r.checkoutUrl };

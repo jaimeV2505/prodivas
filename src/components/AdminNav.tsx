@@ -5,10 +5,11 @@ const TABS = [
   { href: "/admin", key: "dia", label: "Hoy" },
   { href: "/admin/semana", key: "semana", label: "Semana" },
   { href: "/admin/clientas", key: "clientas", label: "Clientas" },
+  { href: "/admin/valoraciones", key: "valoraciones", label: "Opiniones" },
   { href: "/admin/ajustes", key: "ajustes", label: "Ajustes" },
 ];
 
-export default function AdminNav({ active }: { active: "dia" | "semana" | "clientas" | "ajustes" | "cita" }) {
+export default function AdminNav({ active }: { active: "dia" | "semana" | "clientas" | "valoraciones" | "ajustes" | "cita" }) {
   return (
     <header className="admin__bar admin__bar--nav">
       <nav className="admin__tabs" aria-label="Panel">

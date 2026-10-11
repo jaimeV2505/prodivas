@@ -22,4 +22,5 @@ exports.MessageCircle = Icon;
 exports.Phone = Icon;
 exports.Share = Icon;
 exports.Sparkles = Icon;
+exports.Star = Icon;
 exports.X = Icon;

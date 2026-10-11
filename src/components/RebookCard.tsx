@@ -84,7 +84,7 @@ export default function RebookCard({ lang, today, maxDate, baseStartsAt, service
       const r = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ holdId: hj.holdId, holdToken: hj.holdToken, name: contact.name, phone: contact.phone, email: contact.email, notes: "Retoque", acks }),
+        body: JSON.stringify({ holdId: hj.holdId, holdToken: hj.holdToken, name: contact.name, phone: contact.phone, email: contact.email, notes: "Retoque", acks, lang }),
       });
       const j = await r.json();
       if (!r.ok) throw new Error("confirm");

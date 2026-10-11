@@ -7,12 +7,13 @@ import { isAdmin } from "@/lib/auth";
 import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
 import { fmtPrice, waLink } from "@/lib/format";
-import { saveCustomerNotesAction } from "../../actions";
+import { getLoyalty, stampsOf } from "@/lib/loyalty";
+import { redeemLoyaltyAction, saveCustomerNotesAction } from "../../actions";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Ficha de clienta", robots: { index: false, follow: false } };
 
-type Customer = { id: number; name: string; phone: string; email: string | null; notes: string | null; no_show_count: number; visit_count: number; since: string };
+type Customer = { id: number; name: string; phone: string; email: string | null; notes: string | null; no_show_count: number; visit_count: number; since: string; loyalty_redeemed: number; optout_at: string | null };
 type Hist = { id: string; when: string; iso: string; status: string; attendance: string | null; service: string; price: number; deposit: string };
 
 export default async function CustomerPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ ok?: string }> }) {
@@ -28,7 +29,7 @@ export default async function CustomerPage({ params, searchParams }: { params: P
   if (!Number.isInteger(cid) || cid <= 0) notFound();
   const c = (
     await query<Customer>(
-      `SELECT id, name, phone, email, notes, no_show_count, visit_count, to_char(created_at AT TIME ZONE $2::text, 'DD/MM/YYYY') AS since FROM customers WHERE id = $1::bigint`,
+      `SELECT id, name, phone, email, notes, no_show_count, visit_count, loyalty_redeemed, optout_at::text AS optout_at, to_char(created_at AT TIME ZONE $2::text, 'DD/MM/YYYY') AS since FROM customers WHERE id = $1::bigint`,
       [cid, CONFIG.tz],
     )
   )[0];
@@ -42,6 +43,8 @@ export default async function CustomerPage({ params, searchParams }: { params: P
      ORDER BY b.starts_at DESC LIMIT 60`,
     [cid, CONFIG.tz],
   );
+  const loyalty = await getLoyalty().catch(() => ({ enabled: false, every: 10, reward: "" }));
+  const stamps = stampsOf(c.visit_count, c.loyalty_redeemed ?? 0, loyalty.every);
   const spent = hist.filter((h) => h.attendance === "SHOWED").reduce((a, h) => a + h.price, 0);
 
   return (
@@ -57,6 +60,22 @@ export default async function CustomerPage({ params, searchParams }: { params: P
           {c.email && (<><dt>Email</dt><dd>{c.email}</dd></>)}
           <dt>Clienta desde</dt><dd>{c.since}</dd>
           <dt>Visitas</dt><dd>{c.visit_count} · {fmtPrice(spent)} en citas a las que vino</dd>
+          {loyalty.enabled && (
+            <>
+              <dt>Sellos</dt>
+              <dd>
+                {stamps.progress} de {loyalty.every}
+                {stamps.rewards > 0 ? ` · 🎁 ${stamps.rewards} premio${stamps.rewards === 1 ? "" : "s"} pendiente${stamps.rewards === 1 ? "" : "s"} (${loyalty.reward})` : ""}
+                {stamps.rewards > 0 && (
+                  <form action={redeemLoyaltyAction} className="inline-form">
+                    <input type="hidden" name="id" value={c.id} />
+                    <button className="btn btn--primary btn--sm" type="submit">Canjear premio</button>
+                  </form>
+                )}
+              </dd>
+            </>
+          )}
+          {c.optout_at && (<><dt>Mensajes</dt><dd>De baja de los mensajes opcionales (los avisos de la cita siguen llegando)</dd></>)}
           <dt>Plantones</dt><dd className={c.no_show_count >= 2 ? "warn-inline" : ""}>{c.no_show_count}{c.no_show_count >= 2 ? " ⚠ conviene confirmar sus citas por teléfono" : ""}</dd>
         </dl>
       </section>

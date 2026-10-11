@@ -21,7 +21,7 @@ export default async function ReschedulePage({
   const hoursLeft = b ? (new Date(b.startsAt).getTime() - Date.now()) / 3600000 : 0;
   const tel = `tel:+34${CONFIG.salon.phoneMobile.replace(/\s/g, "")}`;
 
-  if (!b || b.status !== "CONFIRMED" || hoursLeft < RESCHEDULE_HOURS) {
+  if (!b || b.status !== "CONFIRMED" || (hoursLeft < RESCHEDULE_HOURS && !b.rescheduleFree)) {
     return (
       <main className="easy easy--narrow">
         <Link href="/cita" className="easy__brand">Pro Diva</Link>

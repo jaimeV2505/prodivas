@@ -23,8 +23,10 @@ const ADDONS = [
   { id: 2, slug: "nail-art-sencillo", name: "Nail art sencillo", description: null, durationMin: 15, priceCents: 500, category: "Manicura y pedicura", i18n: {} },
 ];
 const PACKS = [
-  { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, i18n: {} },
-  { id: 2, slug: "express", name: "Express", emoji: "⚡", description: "Lo básico en una visita corta.", serviceSlugs: ["manicura-clasica", "hilo-cejas"], discountPercent: 0, i18n: {} },
+  { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, featured: true, occasion: null, people: 1, i18n: {} },
+  { id: 3, slug: "madre-e-hija", name: "Madre e hija", emoji: "👩‍👧", description: "Manicura clásica para las dos, una detrás de otra.", serviceSlugs: ["manicura-clasica"], discountPercent: 10, featured: false, occasion: null, people: 2, i18n: {} },
+  { id: 4, slug: "invitada", name: "Invitada de boda", emoji: "👗", description: "Manos y pies a juego y cejas.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente", "hilo-cejas"], discountPercent: 0, featured: false, occasion: "Boda", people: 1, i18n: {} },
+  { id: 2, slug: "express", name: "Express", emoji: "⚡", description: "Lo básico en una visita corta.", serviceSlugs: ["manicura-clasica", "hilo-cejas"], discountPercent: 0, featured: false, occasion: null, people: 1, i18n: {} },
 ];
 
 const TRENDS = [
@@ -71,7 +73,7 @@ const shell = (kind) => {
     ? `<div class="appshell"><header class="appshell__bar"><span class="wordmark"><span class="wordmark__pro">Pro</span><span class="wordmark__diva">Diva</span></span><a class="appshell__call" href="tel:+34670424348">Llamar</a></header><main><div id="root"></div></main><footer class="appshell__help"><p>¿Prefieres que te ayudemos? Llámanos al</p><a href="tel:+34670424348">670 424 348</a></footer></div>`
     : kind === "booking"
       ? `<main class="container flow-page"><h1 class="flow-title">Reserva tu cita</h1><div id="root"></div></main>`
-      : `<main class="${kind === "resched" ? "easy" : ""}"><div id="root"></div></main>`;
+      : `<main class="${kind === "resched" || kind === "response" || kind === "review" || kind === "optout" || kind === "addto" ? "easy" : ""}"><div id="root"></div></main>`;
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><style>:root{--font-display:'DejaVu Sans',sans-serif;--font-body:'DejaVu Sans',sans-serif}</style><style>${css}</style><style>*,*::before,*::after{animation-duration:.001ms!important;animation-delay:0s!important;transition:none!important}</style></head><body>${body}</body></html>`;
 };
 
@@ -102,11 +104,23 @@ async function setup(browser, vp, kind, props, extra = {}) {
     { code: "ZZ99YY88", token: "u".repeat(48), status: "CONFIRMED", startsAt: `${addDays(TODAY, 5)}T16:00:00+02:00`, serviceName: "Lifting de pestañas", cancelReason: null },
     { code: "QQ11WW22", token: "v".repeat(48), status: "CANCELLED", startsAt: `${addDays(TODAY, 4)}T12:00:00+02:00`, serviceName: "Microblading de cejas", cancelReason: "customer" },
   ] } }));
+  await page.route("**/api/bookings/*/alternatives**", (r) => r.fulfill({ json: { alternatives: [3, 4, 6].map((d) => ({ startsAt: `${addDays(TODAY, d)}T17:30:00+02:00`, endsAt: `${addDays(TODAY, d)}T18:15:00+02:00` })) } }));
+  await page.route("**/api/respond", (r) => r.fulfill({ json: { state: JSON.parse(r.request().postData() || "{}").action === "confirm" ? "confirmed" : "cancelled" } }));
+  await page.route("**/api/bookings/*/reschedule", (r) => r.fulfill({ json: { booking: { code: "AB12CD34" } } }));
+  await page.route("**/api/bookings/*/transfer", (r) => r.fulfill({ json: { name: JSON.parse(r.request().postData() || "{}").name } }));
+  await page.route("**/api/bookings/*/extras**", (r) => {
+    if (r.request().method() === "POST") return r.fulfill({ json: { booking: { code: "AB12CD34" } } });
+    return r.fulfill({ json: { services: [{ id: 4, name: "Pedicura semipermanente", durationMin: 60, priceCents: 2800 }, { id: 6, name: "Tinte de cejas", durationMin: 20, priceCents: 800 }] } });
+  });
+  await page.route("**/api/bookings/*/review", (r) => r.fulfill({ json: { saved: true } }));
+  await page.route("**/api/optout", (r) => r.fulfill({ json: { ok: true } }));
+  await page.route("**/api/bookings/*/cancel-all", (r) => r.fulfill({ json: { cancelled: 2 } }));
   await page.route("**/api/waitlist", (r) => r.fulfill({ json: { ok: true, already: false } }));
   await page.route("**/api/callback", (r) => r.fulfill({ json: { ok: true } }));
   await page.addInitScript(({ kind, props, extra }) => {
     window.__AUDIT__ = { component: kind, props };
     if (extra.saved) localStorage.setItem("pd_bookings", JSON.stringify([{ code: "AB12CD34", token: "t".repeat(48) }]));
+    if (extra.visits) localStorage.setItem("pd_visits", JSON.stringify(extra.visits));
     if (extra.profile) localStorage.setItem("pd_profile", JSON.stringify({ name: "María García", phone: "600123456", slug: "manicura-semipermanente", serviceName: "Manicura semipermanente" }));
   }, { kind, props, extra });
   // las imágenes reales de la web (public/images) para que la foto del hero y su máscara carguen
@@ -282,6 +296,219 @@ async function check(page, label, vp, errors, shot) {
       await ctx.close();
     }
 
+    // ===================== cancelar con cabeza: rescate, motivo, aviso de señal, ceder, cancelar todas =====================
+    {
+      const base = { code: "AB12CD34", token: "t".repeat(48), initial: "pending", late: false, noticeHours: 24, depositLoss: 0, canMove: true, closedByCentre: false, legs: 1 };
+      const open = async (props) => {
+        const r = await setup(browser, vp, "response", { ...base, ...props });
+        r.sent = [];
+        r.page.on("request", (q) => { if (q.method() === "POST") r.sent.push({ url: q.url(), body: JSON.parse(q.postData() || "{}") }); });
+        await r.page.waitForSelector(".resp");
+        return r;
+      };
+      // a) «No puedo ir» → primero se ofrece mover; un toque cambia la cita
+      {
+        const { ctx, page, errors, sent } = await open({});
+        await page.click(".resp__btn--no");
+        await page.waitForSelector(".resp__alt");
+        const n = await page.locator(".resp__alt").count();
+        log("cancelar 1 · antes de cancelar se ofrecen 3 huecos para mover", vp.name, n === 3 ? [] : [`huecos: ${n}`]);
+        await check(page, "cancelar 2 · «¿mejor la movemos?»", vp, errors, "cancel-1-rescate");
+        await page.locator(".resp__alt").first().click();
+        await page.waitForSelector(".resp--ok");
+        const mv = sent.find((x) => x.url.endsWith("/reschedule"));
+        log("cancelar 3 · un toque cambia la hora de la cita", vp.name, mv && /T17:30/.test(mv.body.startsAt) ? [] : [JSON.stringify(mv)]);
+        await ctx.close();
+      }
+      // b) prefiero cancelar → motivo en un toque → cancelada con el motivo
+      {
+        const { ctx, page, errors, sent } = await open({});
+        await page.click(".resp__btn--no");
+        await page.waitForSelector(".resp__alt");
+        await page.click("text=No, prefiero cancelar");
+        await page.waitForSelector(".resp__chip");
+        await page.locator(".resp__chip").first().click();
+        await check(page, "cancelar 4 · motivo en un toque", vp, errors, "cancel-2-motivo");
+        await page.click(".resp__btn--no");
+        await page.waitForSelector("text=Cita cancelada");
+        const c = sent.find((x) => x.url.endsWith("/api/respond"));
+        log("cancelar 5 · se envía el motivo elegido", vp.name, c?.body.why === "sick" && c.body.action === "cancel" ? [] : [JSON.stringify(c?.body)]);
+        await ctx.close();
+      }
+      // c) cancelar tarde con señal pagada: aviso claro y casilla obligatoria; también se puede ceder la cita
+      {
+        const { ctx, page, errors, sent } = await open({ late: true, noticeHours: 24, depositLoss: 1000, canMove: false });
+        await page.click(".resp__btn--no");
+        await page.waitForSelector(".resp__warn");
+        const warn = await page.locator(".resp__warn").innerText();
+        log("cancelar 6 · con poco aviso se explica qué pasa con la señal", vp.name, /10\s€|10,00/.test(warn) && /menos de 24 h/.test(warn) ? [] : [warn]);
+        const off = await page.locator(".resp__btn--no").first().isDisabled();
+        log("cancelar 7 · sin aceptar la pérdida de la señal no se puede cancelar", vp.name, off ? [] : ["el botón está activo"]);
+        await check(page, "cancelar 8 · cancelación tardía con señal", vp, errors, "cancel-3-tardia");
+        await page.click(".resp__inline");
+        await page.waitForSelector(".resp__form");
+        await page.fill(".resp__form input >> nth=0", "Ana López");
+        await page.fill(".resp__form input >> nth=1", "611222333");
+        await check(page, "cancelar 9 · ceder la cita a otra persona", vp, errors, "cancel-4-ceder");
+        await page.click(".resp__form button[type=submit]");
+        await page.waitForSelector("text=Cita cedida a Ana López");
+        const t = sent.find((x) => x.url.endsWith("/transfer"));
+        log("cancelar 10 · se envían nombre y teléfono de la otra persona", vp.name, t?.body.name === "Ana López" && t.body.phone === "611222333" ? [] : [JSON.stringify(t?.body)]);
+        await ctx.close();
+      }
+      // d) visita en horas distintas: botón para cancelar todas
+      {
+        const { ctx, page, sent } = await open({ legs: 2 });
+        await page.click(".resp__btn--no");
+        await page.waitForSelector(".resp__alt");
+        await page.click("text=No, prefiero cancelar");
+        await page.waitForSelector(".resp__btn--soft");
+        await page.click(".resp__btn--soft");
+        await page.waitForSelector("text=Citas canceladas (2)");
+        log("cancelar 11 · «cancelar las 2 citas» las cancela de una vez", vp.name, sent.some((x) => x.url.endsWith("/cancel-all")) ? [] : ["no llamó a cancelar todas"]);
+        await ctx.close();
+      }
+      // e) el centro pide mover la cita (cerrar el día): entra directo a elegir hora y cancelar no cuesta nada
+      {
+        const { ctx, page, errors } = await open({ closedByCentre: true, late: true, depositLoss: 0 });
+        await page.waitForSelector(".resp__alt");
+        const title = await page.locator(".resp__big").first().innerText();
+        log("cancelar 12 · si el centro cierra el día se entra directo a elegir hora nueva", vp.name, /Elige una hora nueva/.test(title) ? [] : [title]);
+        await page.click("text=Prefiero cancelar mi cita");
+        await page.waitForSelector(".resp__chip");
+        const noWarn = (await page.locator(".resp__warn").count()) === 0;
+        log("cancelar 13 · sin penalización cuando el centro pide moverla", vp.name, noWarn ? [] : ["sale el aviso de señal"]);
+        await check(page, "cancelar 14 · cita por mover (cerrar el día)", vp, errors, "cancel-5-cerrado");
+        await ctx.close();
+      }
+    }
+    // ===================== después de la visita: valoración (privada primero) y baja =====================
+    {
+      const t = { revTitle: "¿Qué tal ha ido?", revStars: "{n} de 5", revGoodTitle: "¡Muchas gracias! 💖", revGoodBody: "Nos alegra mucho. ¿Nos ayudas con una reseña en Google?", revGoogle: "Dejar mi reseña en Google", revBadTitle: "Gracias por decírnoslo", revBadBody: "Lamentamos que no haya sido perfecto. Cuéntanos qué podemos mejorar.", revComment: "¿Qué podríamos mejorar?", revSend: "Enviar", revThanks: "Gracias. Lo hemos recibido.", revAlready: "Ya nos dejaste tu valoración. ¡Gracias!", revError: "No hemos podido guardarlo." };
+      const open = async (kind, props) => {
+        const r = await setup(browser, vp, kind, props);
+        r.sent = [];
+        r.page.on("request", (q) => { if (q.method() === "POST") r.sent.push({ url: q.url(), body: JSON.parse(q.postData() || "{}") }); });
+        await r.page.waitForSelector(kind === "review" ? ".rev" : ".easy__btn, .resp__big");
+        return r;
+      };
+      {
+        const { ctx, page, errors, sent } = await open("review", { code: "AB12CD34", token: "t".repeat(48), t, googleUrl: "https://g.page/r/ejemplo/review", alreadyRated: false });
+        await page.locator(".rev__star").nth(4).click();
+        await page.waitForSelector(".rev__after a");
+        const href = await page.locator(".rev__after a").getAttribute("href");
+        log("valoración 1 · con 5 estrellas se invita a dejarla en Google", vp.name, href === "https://g.page/r/ejemplo/review" ? [] : [String(href)]);
+        log("valoración 2 · la nota se guarda antes de ir a Google", vp.name, sent.some((x) => x.url.endsWith("/review") && x.body.rating === 5) ? [] : ["no se envió la nota"]);
+        await check(page, "valoración 3 · buena valoración", vp, errors, "review-good");
+        await ctx.close();
+      }
+      {
+        const { ctx, page, errors, sent } = await open("review", { code: "AB12CD34", token: "t".repeat(48), t, googleUrl: "https://g.page/r/ejemplo/review", alreadyRated: false });
+        await page.locator(".rev__star").nth(1).click();
+        await page.waitForSelector(".rev__after textarea");
+        const noGoogle = (await page.locator(".rev__after a").count()) === 0;
+        log("valoración 4 · con 2 estrellas NO se manda a Google: se pregunta qué mejorar en privado", vp.name, noGoogle ? [] : ["aparece el enlace de Google"]);
+        await page.fill(".rev__after textarea", "Tuve que esperar bastante.");
+        await check(page, "valoración 5 · valoración baja, comentario privado", vp, errors, "review-bad");
+        await page.click(".rev__after .easy__btn");
+        await page.waitForSelector("text=Gracias. Lo hemos recibido.");
+        log("valoración 6 · el comentario se envía", vp.name, sent.some((x) => x.body.comment === "Tuve que esperar bastante.") ? [] : ["no se envió el comentario"]);
+        await ctx.close();
+      }
+      {
+        const { ctx, page } = await open("review", { code: "AB12CD34", token: "t".repeat(48), t, googleUrl: null, alreadyRated: true });
+        const txt = await page.locator(".rev").innerText();
+        log("valoración 7 · si ya valoró, solo se le da las gracias", vp.name, /Ya nos dejaste/.test(txt) ? [] : [txt]);
+        await ctx.close();
+      }
+      {
+        const { ctx, page, errors, sent } = await open("optout", { token: "5.abcdefabcdefabcdefabcdef", label: "Confirmar baja", done: "Hecho. No te escribiremos más.", error: "No hemos podido guardarlo." });
+        await check(page, "baja 1 · botón de baja", vp, errors, "optout");
+        await page.click(".easy__btn");
+        await page.waitForSelector("text=Hecho. No te escribiremos más.");
+        log("baja 2 · la baja se confirma con un botón (POST), no al abrir el enlace", vp.name, sent.some((x) => x.url.endsWith("/api/optout") && x.body.token === "5.abcdefabcdefabcdefabcdef") ? [] : ["no se envió"]);
+        await ctx.close();
+      }
+    }
+    // ===================== fase 3: packs para dos / destacado / ocasión, toca retoque, test y añadir a la cita =====================
+    {
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };
+      // a) packs: destacado, de ocasión y para dos
+      {
+        const { ctx, page, errors } = await setup(browser, vp, "booking", props);
+        const holds = [];
+        page.on("request", (r) => { if (r.method() === "POST" && r.url().endsWith("/api/holds")) holds.push(JSON.parse(r.postData() || "{}")); });
+        await page.waitForSelector(".pack");
+        const tags = await page.locator(".pack__tag").allInnerTexts();
+        log("fase3 1 · los packs muestran «destacado», la ocasión y «para dos»", vp.name, tags.some((t) => /destacado/i.test(t)) && tags.some((t) => /Boda/.test(t)) && tags.some((t) => /Para dos/.test(t)) ? [] : [tags.join(" | ")]);
+        await check(page, "fase3 2 · packs destacado, ocasión y para dos", vp, errors, "p3-packs");
+        await page.locator(".pack", { hasText: "Madre e hija" }).click();
+        await page.waitForSelector(".pack-two");
+        await page.fill(".pack-two input", "Ana");
+        await check(page, "fase3 3 · pack para dos: nombre de la acompañante", vp, errors, "p3-dos");
+        await page.click(".pack-two button[type=submit]");
+        await page.waitForSelector(".visit__pack");
+        const line = await page.locator(".visit__pack").innerText();
+        const rows = await page.locator(".visit__list li").count();
+        log("fase3 4 · el pack para dos suma sus servicios dos veces y aplica el descuento (2,40 €)", vp.name, rows === 2 && /2,40/.test(line) ? [] : [`líneas ${rows}: ${line}`]);
+        await page.waitForSelector(".quick__chip", { timeout: 5000 });
+        const chip = page.locator(".quick__chip").first();
+        await chip.evaluate((e) => e.scrollIntoView({ block: "center" }));
+        await chip.click();
+        await page.waitForSelector(".holdbar");
+        const h = holds[holds.length - 1] ?? {};
+        log("fase3 5 · se pide el bloqueo con el pack para dos", vp.name, h.packageSlug === "madre-e-hija" && h.serviceIds?.length === 2 ? [] : [JSON.stringify(h)]);
+        await ctx.close();
+      }
+      // b) «toca retoque» según las visitas guardadas en el móvil
+      {
+        const visits = [{ startsAt: new Date(Date.now() - 21 * 86400000).toISOString(), slugs: ["manicura-semipermanente"], color: "Rosa chicle" }];
+        const { ctx, page, errors } = await setup(browser, vp, "booking", props, { visits });
+        await page.waitForSelector(".retouch");
+        const txt = await page.locator(".retouch").innerText();
+        log("fase3 6 · «toca retoque» con las semanas y el color de la última vez", vp.name, /3 semanas/.test(txt) && /Rosa chicle/.test(txt) ? [] : [txt]);
+        await check(page, "fase3 7 · toca retoque", vp, errors, "p3-retoque");
+        await page.click(".retouch .btn");
+        await page.waitForSelector(".visit__title");
+        const list = await page.locator(".visit__list li, .legs li").allInnerTexts();
+        log("fase3 8 · «Reservar retoque» deja elegida la manicura semipermanente", vp.name, list.some((x) => /Manicura semipermanente/.test(x)) ? [] : [list.join(" | ")]);
+        await ctx.close();
+      }
+      // c) test «¿qué manicura eres?»
+      {
+        const { ctx, page, errors } = await setup(browser, vp, "booking", props);
+        await page.waitForSelector(".quiz__cta");
+        await page.click(".quiz__cta");
+        await page.locator(".quiz__opt").nth(2).click(); // todo el tiempo
+        await page.locator(".quiz__opt").nth(2).click(); // atrevida
+        await check(page, "fase3 9 · test: tercera pregunta", vp, errors, "p3-quiz");
+        await page.locator(".quiz__opt").nth(2).click(); // lo máximo posible
+        await page.waitForSelector(".quiz__res");
+        const t = await page.locator(".quiz__rt").innerText();
+        log("fase3 10 · el test recomienda «Look completo» a quien tiene tiempo, es atrevida y quiere que dure", vp.name, /Look completo/.test(t) ? [] : [t]);
+        await check(page, "fase3 11 · resultado del test", vp, errors, "p3-quiz-res");
+        await page.click(".quiz__res .btn--primary");
+        await page.waitForSelector(".visit__title");
+        const items = await page.locator(".visit__list li").count();
+        const extras = await page.locator(".extras__row .extra.is-on").count();
+        log("fase3 12 · reservar desde el test elige los 3 servicios y el nail art sugerido", vp.name, items === 3 && extras === 1 ? [] : [`servicios ${items}, extras ${extras}`]);
+        await ctx.close();
+      }
+      // d) añadir un servicio a una cita ya reservada
+      {
+        const r = await setup(browser, vp, "addto", { code: "AB12CD34", token: "t".repeat(48) });
+        const sent = [];
+        r.page.on("request", (q) => { if (q.method() === "POST" && q.url().includes("/extras")) sent.push(JSON.parse(q.postData() || "{}")); });
+        await r.page.waitForSelector(".addto__btn");
+        const n = await r.page.locator(".addto__btn").count();
+        log("fase3 13 · se ofrecen los servicios que caben a continuación de la cita", vp.name, n === 2 ? [] : [`botones: ${n}`]);
+        await check(r.page, "fase3 14 · añade algo a tu cita", vp, r.errors, "p3-addto");
+        await r.page.locator(".addto__btn").first().click();
+        await r.page.waitForTimeout(400);
+        log("fase3 15 · al pulsar se pide añadir ese servicio", vp.name, sent[0]?.serviceId === 4 ? [] : [JSON.stringify(sent)]);
+        await r.ctx.close();
+      }
+    }
     // ===================== visita con cada servicio a su hora =====================
     {
       const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };

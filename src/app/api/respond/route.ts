@@ -11,13 +11,14 @@ const Body = z.object({
   code: z.string().min(4).max(16),
   token: z.string().min(12),
   action: z.enum(["confirm", "cancel"]),
+  why: z.enum(["sick", "work", "other"]).optional(), // motivo, en un toque (opcional)
 });
 
 // POST (nunca GET): los antivirus de correo "abren" los enlaces y no deben confirmar ni cancelar nada.
 export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
-    const r = await respondToBooking({ code: b.code.toUpperCase(), token: b.token, action: b.action });
+    const r = await respondToBooking({ code: b.code.toUpperCase(), token: b.token, action: b.action, why: b.why ?? null });
     if (r.changed && r.state !== "already_cancelled") {
       after(async () => {
         await notifyOwnerResponse(r.booking, r.state as "confirmed" | "cancelled");

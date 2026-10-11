@@ -19,6 +19,10 @@ const CHANNEL: Record<string, string> = { whatsapp: "WhatsApp", sms: "SMS", emai
 const KIND: Record<string, string> = {
   created: "Confirmación",
   reminder: "Recordatorio",
+  reminder_evening: "Recordatorio de la víspera",
+  reminder_second: "Segundo recordatorio",
+  aftercare: "Gracias y cuidados",
+  rebook_nudge: "Toca retoque",
   rescheduled: "Cambio de hora",
   cancelled_by_centre: "Cancelación del centro",
   waitlist: "Hueco libre",
@@ -75,6 +79,9 @@ export default async function BookingDetail({
 
       <section className="panel">
         <h1 className="panel__title">{b.serviceName}</h1>
+        {b.status === "CONFIRMED" && b.customerPhone && log.some((l) => l.kind === "created") && log.filter((l) => l.kind === "created").every((l) => l.status === "FAILED" || l.delivery_status === "failed" || l.delivery_status === "undelivered") && (
+          <p className="notice notice--error" role="alert">⚠️ Ningún aviso de confirmación ha llegado a la clienta. <a href={`tel:${b.customerPhone}`}>Llámala</a> para asegurarte de que sabe su cita.</p>
+        )}
         <p><StatusTag status={b.status} attendance={b.attendance} startsAt={b.startsAt} cancelReason={b.cancelReason} /></p>
         <dl className="details">
           <dt>Cuándo</dt><dd>{fmtLong(b.startsAt)} ({fmtDuration(b.durationMin)})</dd>

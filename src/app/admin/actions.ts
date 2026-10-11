@@ -5,11 +5,12 @@ import { after } from "next/server";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { isAdmin, loginAdmin, logoutAdmin } from "@/lib/auth";
-import { addTimeOff, adminCancel, BookingError, createManualBooking, getSummaryById, markAttendance, removeTimeOff, rescheduleBooking } from "@/lib/bookings";
-import { notifyCancelledByCentre, notifyOwnerRepeatOffender, notifyRescheduled } from "@/lib/notify";
+import { addTimeOff, adminCancel, BookingError, closeDay, createManualBooking, getSummaryById, markAttendance, removeTimeOff, rescheduleBooking } from "@/lib/bookings";
+import { notifyCancelledByCentre, notifyDayClosed, notifyOwnerRepeatOffender, notifyRescheduled } from "@/lib/notify";
 import { settleDeposit } from "@/lib/payments";
 import { query } from "@/lib/db";
-import { offerFreedSlot } from "@/lib/waitlist";
+import { getLoyalty } from "@/lib/loyalty";
+import { offerDay, offerFreedSlot } from "@/lib/waitlist";
 import { isDay } from "@/lib/dates";
 import { CONFIG } from "@/lib/config";
 
@@ -98,6 +99,30 @@ export async function addTimeOffAction(fd: FormData) {
   back(isDay(day) ? day : "", error);
 }
 
+/**
+ * «Cerrar el día»: bloquea el día entero y deja todas sus citas «por mover». A cada clienta le llega un mensaje con
+ * un enlace para elegir otra hora (con 3 propuestas) o cancelar sin coste (si pagó señal, se le devuelve).
+ */
+export async function closeDayAction(fd: FormData) {
+  await guard();
+  const day = str(fd, "day");
+  if (!isDay(day)) back("", "Fecha no válida.");
+  if (fd.get("confirm") !== "on") back(day, "Marca la casilla para confirmar que quieres cerrar el día.");
+  const note = str(fd, "note").slice(0, 160) || null;
+  let msg: string;
+  try {
+    const list = await closeDay({ day, note });
+    // avisos de cinco en cinco, para no saturar los proveedores de mensajes
+    for (let i = 0; i < list.length; i += 5) await Promise.all(list.slice(i, i + 5).map((b) => notifyDayClosed(b, note).catch((e) => console.error("[closeDay:notify]", e))));
+    msg = list.length ? `Día cerrado: ${list.length} clienta${list.length === 1 ? "" : "s"} avisada${list.length === 1 ? "" : "s"} para mover su cita.` : "Día cerrado. No había citas ese día.";
+  } catch (e) {
+    console.error("[closeDay]", e);
+    back(day, "No se pudo cerrar el día. Inténtalo de nuevo.");
+  }
+  revalidatePath("/admin");
+  redirect(`/admin?d=${day}&ok=${encodeURIComponent(msg!)}`);
+}
+
 export async function removeTimeOffAction(fd: FormData) {
   await guard();
   await removeTimeOff(Number(str(fd, "id")));
@@ -176,4 +201,33 @@ export async function saveCustomerNotesAction(fd: FormData) {
   await query(`UPDATE customers SET notes = $2 WHERE id = $1::bigint`, [id, str(fd, "notes").slice(0, 2000) || null]);
   revalidatePath(`/admin/clientas/${id}`);
   redirect(`/admin/clientas/${id}?ok=Notas%20guardadas`);
+}
+
+/** «Ofrecer a la lista»: avisa a quienes esperan de que hay huecos libres ese día (por orden de llegada, solo si les cabe su servicio). */
+export async function offerDayAction(fd: FormData) {
+  await guard();
+  const day = str(fd, "day");
+  if (!isDay(day)) redirect("/admin");
+  let n = 0;
+  try {
+    n = await offerDay(day, 10);
+  } catch (e) {
+    console.error("[offerDay]", e);
+    redirect(`/admin/ofrecer?d=${day}&err=${encodeURIComponent("No se pudo avisar. Inténtalo de nuevo.")}`);
+  }
+  redirect(`/admin/ofrecer?d=${day}&ok=${encodeURIComponent(n ? `Avisadas ${n} persona${n === 1 ? "" : "s"} de la lista de espera.` : "Nadie de la lista encaja con los huecos libres de ese día.")}`);
+}
+
+/** Canjea un premio de fidelidad (solo si tiene alguno pendiente): la tarjeta vuelve a empezar. */
+export async function redeemLoyaltyAction(fd: FormData) {
+  await guard();
+  const id = Number(str(fd, "id"));
+  if (!Number.isInteger(id) || id <= 0) redirect("/admin/clientas");
+  const l = await getLoyalty();
+  const r = await query<{ id: number }>(
+    `UPDATE customers SET loyalty_redeemed = loyalty_redeemed + 1 WHERE id = $1::bigint AND floor(visit_count::numeric / $2::int) > loyalty_redeemed RETURNING id`,
+    [id, l.every],
+  );
+  revalidatePath(`/admin/clientas/${id}`);
+  redirect(`/admin/clientas/${id}?ok=${encodeURIComponent(r.length ? `Premio canjeado: ${l.reward}.` : "No tiene premios pendientes.")}`);
 }

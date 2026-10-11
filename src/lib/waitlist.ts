@@ -20,6 +20,7 @@ export async function joinWaitlist(input: {
   phone: string;
   email?: string | null;
   source: "web" | "app";
+  lang?: string;
   ipHash: string;
 }): Promise<{ already: boolean; serviceName: string }> {
   const visit = await loadVisit(input.serviceIds); // valida que existan, estén activos y sean 1 a 4
@@ -33,9 +34,9 @@ export async function joinWaitlist(input: {
 
   try {
     await query(
-      `INSERT INTO waitlist (service_id, service_ids, day, part, name, phone, phone_key, email, source, ip_hash)
-       VALUES ($1::int, $10::int[], $2::date, $3, $4, $5, $6, $7, $8, $9)`,
-      [visit.items[0].id, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash, visit.items.length > 1 ? visit.items.map((i) => i.id) : null],
+      `INSERT INTO waitlist (service_id, service_ids, day, part, name, phone, phone_key, email, source, ip_hash, lang)
+       VALUES ($1::int, $10::int[], $2::date, $3, $4, $5, $6, $7, $8, $9, $11)`,
+      [visit.items[0].id, input.day, input.part, input.name, input.phone, phoneDigits(input.phone).slice(-9), input.email || null, input.source, input.ipHash, visit.items.length > 1 ? visit.items.map((i) => i.id) : null, input.lang === "gl" || input.lang === "en" ? input.lang : "es"],
     );
     return { already: false, serviceName: visit.name };
   } catch (e) {
@@ -54,11 +55,21 @@ const partOk = (part: string, r: SlotRow) => part === "ANY" || (part === "MORNIN
  */
 export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<number> {
   const freedStart = new Date(b.startsAt).getTime();
-  const freedEnd = new Date(b.endsAt).getTime();
   if (freedStart < Date.now() + 30 * 60_000) return 0; // demasiado tarde para que alguien llegue
+  const notified = await offerWindow(b.startsAt, b.endsAt, maxPeople);
+  if (notified > 0) await notifyOwnerWaitlistOffered(b, notified);
+  return notified;
+}
 
+/**
+ * Avisa a quienes esperan, por orden de llegada, de que hay hueco dentro de la ventana [startsAt, endsAt):
+ * comprueba con el motor de disponibilidad que de verdad les cabe su servicio. Devuelve a cuántas avisó.
+ */
+export async function offerWindow(startsAtIso: string, endsAtIso: string, maxPeople: number): Promise<number> {
+  const freedStart = new Date(startsAtIso).getTime();
+  const freedEnd = new Date(endsAtIso).getTime();
   const today = todayIn(CONFIG.tz);
-  const freedDay = todayIn(CONFIG.tz, new Date(b.startsAt));
+  const freedDay = todayIn(CONFIG.tz, new Date(startsAtIso));
 
   const entries = await query<{
     id: string;
@@ -66,10 +77,11 @@ export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<
     phone: string;
     email: string | null;
     part: string;
+    lang: string;
     service_id: number;
     service_ids: number[] | null;
   }>(
-    `SELECT w.id, w.name, w.phone, w.email, w.part, w.service_id, w.service_ids
+    `SELECT w.id, w.name, w.phone, w.email, w.part, w.lang, w.service_id, w.service_ids
      FROM waitlist w
      WHERE w.status = 'ACTIVE' AND (w.day = $1::date OR (w.day IS NULL AND $1::date <= $2::date + 14))
      ORDER BY w.created_at LIMIT 40`,
@@ -96,17 +108,22 @@ export async function offerFreedSlot(b: BookingSummary, maxPeople = 3): Promise<
     const dur = (visit.durationMin + visit.bufferMin) * 60_000;
     const fit = rows.find((r) => {
       const t = new Date(r.startsAt).getTime();
-      return r.available && partOk(w.part, r) && t < freedEnd && t + dur > freedStart;
+      return r.available && partOk(w.part, r) && t > Date.now() + 30 * 60_000 && t < freedEnd && t + dur > freedStart;
     });
     if (!fit) continue;
-    const ok = await notifyWaitlistSlot({ id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: visit.name }, fit.startsAt);
+    const ok = await notifyWaitlistSlot({ id: w.id, name: w.name, phone: w.phone, email: w.email, serviceName: visit.name, lang: w.lang }, fit.startsAt);
     if (ok) {
       await query(`UPDATE waitlist SET status = 'NOTIFIED', notified_at = now(), notified_slot = $2::timestamptz WHERE id = $1::uuid`, [w.id, fit.startsAt]);
       notified++;
     }
   }
-  if (notified > 0) await notifyOwnerWaitlistOffered(b, notified);
   return notified;
+}
+
+/** «Ofrecer a la lista» desde el panel: avisa a quienes esperan de que hay huecos libres ese día. */
+export async function offerDay(day: string, maxPeople = 10): Promise<number> {
+  const base = new Date(`${day}T12:00:00Z`).getTime();
+  return offerWindow(new Date(base - 36 * 3600_000).toISOString(), new Date(base + 36 * 3600_000).toISOString(), maxPeople);
 }
 
 /** Cuando alguien reserva, deja de esperar ese día. */

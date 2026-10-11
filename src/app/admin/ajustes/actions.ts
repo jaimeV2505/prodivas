@@ -6,6 +6,7 @@ import { z } from "zod";
 import { isAdmin } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { CONSENT_KINDS } from "@/lib/consent";
+import { isDay } from "@/lib/dates";
 import { enabled, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type SendResult } from "@/lib/messaging";
 
 async function guard() {
@@ -34,6 +35,8 @@ const ServiceSchema = z.object({
   sort: z.coerce.number().int().min(0).max(9999),
   rebook: z.number().int().min(1, "El retoque es de 1 a 26 semanas").max(26, "El retoque es de 1 a 26 semanas").nullable(),
   consent: z.enum(CONSENT_KINDS).nullable(),
+  notice: z.number().int().min(0, "El plazo va de 0 a 168 horas").max(168, "El plazo va de 0 a 168 horas").nullable(),
+  aftercare: z.string().max(500, "Los cuidados caben en 500 caracteres"),
 });
 
 function parseService(fd: FormData) {
@@ -50,6 +53,8 @@ function parseService(fd: FormData) {
     sort: str(fd, "sort") || "0",
     rebook: str(fd, "rebook") === "" ? null : Number(str(fd, "rebook")),
     consent: str(fd, "consent") === "" ? null : str(fd, "consent"),
+    notice: str(fd, "notice") === "" ? null : Number(str(fd, "notice")),
+    aftercare: str(fd, "aftercare"),
   });
   if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa los datos del servicio");
   return r.data!;
@@ -71,8 +76,8 @@ export async function saveServiceAction(fd: FormData) {
   await query(
     `UPDATE services SET name = $2, category = $3, duration_min = $4, price_cents = $5, slot_step_min = $6, sort = $7, active = $8,
                          buffer_min = $9, deposit_cents = LEAST($10::int, $5::int),
-                         rebook_weeks = $11::int, consent_kind = $12, deposit_always = $13 WHERE id = $1::int`,
-    [id, s.name, s.category, s.duration, s.price, s.step, s.sort, fd.get("active") === "on", s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on"],
+                         rebook_weeks = $11::int, consent_kind = $12, deposit_always = $13, cancel_notice_hours = $14::int, aftercare = NULLIF($15, '') WHERE id = $1::int`,
+    [id, s.name, s.category, s.duration, s.price, s.step, s.sort, fd.get("active") === "on", s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on", s.notice, s.aftercare],
   );
   revalidatePath("/admin/ajustes");
   done(`Guardado: ${s.name}`);
@@ -86,9 +91,9 @@ export async function addServiceAction(fd: FormData) {
   let slug = base;
   for (let i = 2; taken.has(slug); i++) slug = `${base}-${i}`;
   await query(
-    `INSERT INTO services (slug, name, category, duration_min, price_cents, slot_step_min, sort, active, buffer_min, deposit_cents, rebook_weeks, consent_kind, deposit_always)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, LEAST($9::int, $5::int), $10::int, $11, $12)`,
-    [slug, s.name, s.category, s.duration, s.price, s.step, s.sort, s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on"],
+    `INSERT INTO services (slug, name, category, duration_min, price_cents, slot_step_min, sort, active, buffer_min, deposit_cents, rebook_weeks, consent_kind, deposit_always, cancel_notice_hours)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, LEAST($9::int, $5::int), $10::int, $11, $12, $13::int)`,
+    [slug, s.name, s.category, s.duration, s.price, s.step, s.sort, s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on", s.notice],
   );
   revalidatePath("/admin/ajustes");
   done(`Servicio creado: ${s.name}`);
@@ -313,16 +318,23 @@ const PackSchema = z.object({
   description: z.string().max(160),
   discount: z.coerce.number().int().min(0, "El descuento va de 0 a 90 %").max(90, "El descuento va de 0 a 90 %"),
   sort: z.coerce.number().int().min(0).max(9999),
+  occasion: z.string().max(40),
+  people: z.coerce.number().int().refine((n) => n === 1 || n === 2, "Un pack es para 1 o 2 personas"),
 });
 async function parsePack(fd: FormData) {
-  const r = PackSchema.safeParse({ name: str(fd, "name"), emoji: str(fd, "emoji") || "✨", description: str(fd, "description"), discount: str(fd, "discount") || "0", sort: str(fd, "sort") || "100" });
+  const r = PackSchema.safeParse({ name: str(fd, "name"), emoji: str(fd, "emoji") || "✨", description: str(fd, "description"), discount: str(fd, "discount") || "0", sort: str(fd, "sort") || "100", occasion: str(fd, "occasion"), people: str(fd, "people") || "1" });
   if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa el pack");
   const slugs = Array.from(new Set(fd.getAll("services").map(String)));
-  if (slugs.length < 2) fail("Un pack lleva al menos dos servicios");
-  if (slugs.length > 6) fail("Un pack lleva como mucho 6 servicios");
+  const people = r.data!.people;
+  if (people === 1 && slugs.length < 2) fail("Un pack lleva al menos dos servicios (o elige «para dos» con uno)");
+  if (slugs.length * people > 6) fail("Un pack lleva como mucho 6 servicios en total");
+  const startsOn = str(fd, "starts_on") || null;
+  const endsOn = str(fd, "ends_on") || null;
+  if ((startsOn && !isDay(startsOn)) || (endsOn && !isDay(endsOn))) fail("Las fechas de temporada no son válidas");
+  if (startsOn && endsOn && endsOn < startsOn) fail("La temporada termina antes de empezar");
   const ok = await query<{ slug: string }>(`SELECT slug FROM services WHERE slug = ANY($1::text[]) AND active`, [slugs]);
   if (ok.length !== slugs.length) fail("Alguno de los servicios no existe o está desactivado");
-  return { ...r.data!, slugs };
+  return { ...r.data!, slugs, startsOn, endsOn, featured: fd.get("featured") === "on" };
 }
 const afterCatalog = (msg: string) => {
   revalidatePath("/admin/ajustes");
@@ -336,7 +348,7 @@ export async function addPackAction(fd: FormData) {
   const taken = new Set((await query<{ slug: string }>(`SELECT slug FROM packages WHERE slug LIKE $1`, [`${base}%`])).map((r) => r.slug));
   let slug = base;
   for (let i = 2; taken.has(slug); i++) slug = `${base}-${i}`;
-  await query(`INSERT INTO packages (slug, name, emoji, description, service_slugs, discount_percent, sort) VALUES ($1, $2, $3, $4, $5::text[], $6::int, $7::int)`, [slug, p.name, p.emoji, p.description || null, p.slugs, p.discount, p.sort]);
+  await query(`INSERT INTO packages (slug, name, emoji, description, service_slugs, discount_percent, sort, occasion, people, starts_on, ends_on, featured) VALUES ($1, $2, $3, $4, $5::text[], $6::int, $7::int, NULLIF($8, ''), $9::int, $10::date, $11::date, $12)`, [slug, p.name, p.emoji, p.description || null, p.slugs, p.discount, p.sort, p.occasion, p.people, p.startsOn, p.endsOn, p.featured]);
   afterCatalog(`Pack creado: ${p.name}`);
 }
 export async function savePackAction(fd: FormData) {
@@ -344,8 +356,9 @@ export async function savePackAction(fd: FormData) {
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   const p = await parsePack(fd);
   await query(
-    `UPDATE packages SET name = $2, emoji = $3, description = $4, service_slugs = $5::text[], discount_percent = $6::int, sort = $7::int, active = $8 WHERE id = $1::int`,
-    [id, p.name, p.emoji, p.description || null, p.slugs, p.discount, p.sort, fd.get("active") === "on"],
+    `UPDATE packages SET name = $2, emoji = $3, description = $4, service_slugs = $5::text[], discount_percent = $6::int, sort = $7::int, active = $8,
+            occasion = NULLIF($9, ''), people = $10::int, starts_on = $11::date, ends_on = $12::date, featured = $13 WHERE id = $1::int`,
+    [id, p.name, p.emoji, p.description || null, p.slugs, p.discount, p.sort, fd.get("active") === "on", p.occasion, p.people, p.startsOn, p.endsOn, p.featured],
   );
   afterCatalog(`Pack guardado: ${p.name}`);
 }
@@ -396,4 +409,22 @@ export async function deleteAddonAction(fd: FormData) {
   const id = Number(str(fd, "id"));
   if (Number.isInteger(id)) await query(`DELETE FROM addons WHERE id = $1::int`, [id]);
   afterCatalog("Extra borrado");
+}
+
+/* ---------- Fidelidad (sellos) ---------- */
+export async function saveLoyaltyAction(fd: FormData) {
+  await guard();
+  const r = z
+    .object({
+      every: z.coerce.number().int().min(2, "Mínimo 2 visitas").max(50, "Máximo 50 visitas"),
+      reward: z.string().trim().min(3, "Escribe cuál es el premio").max(80),
+    })
+    .safeParse({ every: str(fd, "every") || "10", reward: str(fd, "reward") });
+  if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa el programa de fidelidad");
+  const v = r.data!;
+  for (const [k, val] of [["loyalty_enabled", fd.get("enabled") === "on" ? "on" : "off"], ["loyalty_every", String(v.every)], ["loyalty_reward", v.reward]] as const) {
+    await query(`INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [k, val]);
+  }
+  revalidatePath("/admin/ajustes");
+  done("Programa de fidelidad guardado");
 }
