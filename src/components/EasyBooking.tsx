@@ -388,7 +388,7 @@ export default function EasyBooking({
           <MyBookings variant="easy">
           {canRepeat && (
             <button type="button" className="easy__btn easy__btn--main" onClick={repeatLast}>
-              Repetir: {profile.serviceName}
+              Repetir: {profile?.serviceName}
             </button>
           )}
           <button
