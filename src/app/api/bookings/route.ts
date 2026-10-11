@@ -17,6 +17,7 @@ const Body = z.object({
     .regex(/^[+\d][\d\s().-]{7,17}$/, "Escribe un teléfono válido"),
   email: z.string().trim().email("Revisa tu email").max(120).optional().or(z.literal("")),
   notes: z.string().trim().max(500).optional(),
+  acks: z.array(z.enum(["laser", "microblading"])).max(4).optional(), // casillas de seguridad marcadas
   website: z.string().optional(), // honeypot: las personas no lo ven ni lo rellenan
 });
 
@@ -31,6 +32,7 @@ export async function POST(req: NextRequest) {
       phone: b.phone,
       email: b.email || null,
       notes: b.notes || null,
+      acks: b.acks,
     });
     // Con señal pendiente se devuelve el enlace de pago; los avisos salen cuando Stripe confirma el pago
     if (r.checkoutUrl) return { booking: r.booking, checkoutUrl: r.checkoutUrl };

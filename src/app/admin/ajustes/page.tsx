@@ -4,6 +4,7 @@ import AdminNav from "@/components/AdminNav";
 import { logout } from "../actions";
 import { isAdmin } from "@/lib/auth";
 import { getSlotMode, SLOT_MODES, type SlotMode } from "@/lib/availability";
+import { getDepositPolicy } from "@/lib/deposit";
 import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
@@ -12,10 +13,17 @@ import { DEPOSIT_REFUND_HOURS, stripeEnabled } from "@/lib/payments";
 import { derivedSecret } from "@/lib/secrets";
 import { siteUrl } from "@/lib/site";
 import {
+  addAddonAction,
+  addPackAction,
   addServiceAction,
   addStaffAction,
   addTrendAction,
+  deleteAddonAction,
+  deletePackAction,
   deleteTrendAction,
+  saveAddonAction,
+  saveDepositPolicyAction,
+  savePackAction,
   saveTrendAction,
   clearStaffHoursAction,
   saveHoursAction,
@@ -29,10 +37,12 @@ import {
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Ajustes", robots: { index: false, follow: false } };
 
-type Svc = { id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
+type Svc = { rebook_weeks: number | null; consent_kind: string | null; deposit_always: boolean; id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
 type Hours = { weekday: number; closed: boolean; open: string | null; close: string | null; bs: string | null; be: string | null };
 type StaffHours = Hours & { staff_id: number };
 type Staff = { id: number; name: string; active: boolean };
+type PackRow = { id: number; name: string; emoji: string; description: string | null; service_slugs: string[]; discount_percent: number; active: boolean; sort: number };
+type AddonRow = { id: number; name: string; description: string | null; duration_min: number; price_cents: number; category: string | null; active: boolean; sort: number };
 type TrendRow = { id: number; emoji: string; title: string; body: string; topic: string; service_slug: string | null; active: boolean; sort: number };
 const TOPIC_LABEL: Record<string, string> = { nails: "Uñas", lashes: "Pestañas", brows: "Cejas", wax: "Depilación", general: "General" };
 
@@ -67,8 +77,8 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     );
   }
 
-  const [services, hoursRows, mode, staff, staffHours, cron, trends] = await Promise.all([
-    query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, active, sort FROM services ORDER BY active DESC, sort, id`),
+  const [services, hoursRows, mode, staff, staffHours, cron, trends, packs, addons, policy] = await Promise.all([
+    query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, deposit_always, rebook_weeks, consent_kind, active, sort FROM services ORDER BY active DESC, sort, id`),
     query<Hours>(
       `SELECT weekday, closed, to_char(open_time, 'HH24:MI') AS open, to_char(close_time, 'HH24:MI') AS close,
               to_char(break_start, 'HH24:MI') AS bs, to_char(break_end, 'HH24:MI') AS be FROM business_hours`,
@@ -81,6 +91,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     ),
     query<{ mins: number | null }>(`SELECT (EXTRACT(EPOCH FROM (now() - value::timestamptz)) / 60)::int AS mins FROM settings WHERE key = 'last_cron_run'`),
     query<TrendRow>(`SELECT id, emoji, title, body, topic, service_slug, active, sort FROM trends ORDER BY active DESC, sort, id`).catch(() => [] as TrendRow[]),
+    query<PackRow>(`SELECT id, name, emoji, description, service_slugs, discount_percent, active, sort FROM packages ORDER BY active DESC, sort, id`).catch(() => [] as PackRow[]),
+    query<AddonRow>(`SELECT id, name, description, duration_min, price_cents, category, active, sort FROM addons ORDER BY active DESC, sort, id`).catch(() => [] as AddonRow[]),
+    getDepositPolicy().catch(() => ({ mode: "service" as const, afterNoShows: 1, defaultCents: 1000 })),
   ]);
   const byDay = new Map(hoursRows.map((h) => [h.weekday, h]));
   const eur = (c: number) => (c / 100).toString().replace(".", ",");
@@ -187,6 +200,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <label className="field"><span>Señal (€)</span><input name="deposit" inputMode="decimal" defaultValue={eur(s.deposit_cents)} /></label>
               <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} defaultValue={s.slot_step_min ?? ""} placeholder={String(s.duration_min)} /></label>
               <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={s.sort} /></label>
+              <label className="field"><span>Retoque (semanas)</span><input name="rebook" type="number" min={1} max={26} defaultValue={s.rebook_weeks ?? ""} placeholder="—" /></label>
+              <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue={s.consent_kind ?? ""}><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
+              <label className="check"><input type="checkbox" name="deposit_always" defaultChecked={s.deposit_always} /><span>Señal siempre</span></label>
               <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={s.active} /><span>Activo</span></label>
               <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
             </form>
@@ -203,6 +219,112 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field"><span>Señal (€)</span><input name="deposit" inputMode="decimal" defaultValue="0" /></label>
           <label className="field"><span>Hueco (min)</span><input name="step" type="number" min={5} max={480} step={5} placeholder="= duración" /></label>
           <label className="field"><span>Orden</span><input name="sort" type="number" min={0} defaultValue={500} /></label>
+          <label className="field"><span>Retoque (semanas)</span><input name="rebook" type="number" min={1} max={26} placeholder="—" /></label>
+          <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue=""><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
+          <label className="check"><input type="checkbox" name="deposit_always" /><span>Señal siempre</span></label>
+          <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Señal inteligente</h2>
+        <p className="muted small">
+          Solo funciona si tienes los cobros con tarjeta (Stripe) activados. «Según el servicio» pide la señal que lleve cada servicio, como siempre.
+          «Solo a quien ya ha faltado» la pide únicamente a las clientas con plantones (y a los servicios marcados «Señal siempre»): las clientas nuevas y cumplidoras reservan sin pagar nada.
+          Nunca se le dice a nadie su historial: solo se le avisa de que, si ha faltado antes, se le pedirá una señal.
+        </p>
+        <form action={saveDepositPolicyAction} className="svc">
+          <label className="field field--wide"><span>A quién se le pide</span>
+            <select name="policy" defaultValue={policy.mode}>
+              <option value="service">Según el servicio (como ahora)</option>
+              <option value="repeat">Solo a quien ya ha faltado</option>
+            </select>
+          </label>
+          <label className="field field--narrow"><span>Plantones</span><input type="number" name="after" min={1} max={10} defaultValue={policy.afterNoShows} /></label>
+          <label className="field"><span>Importe si el servicio no lleva señal (€)</span><input name="amount" inputMode="decimal" defaultValue={eur(policy.defaultCents)} /></label>
+          <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Packs</h2>
+        <p className="muted small">
+          Combinaciones de servicios ya pensadas que la clienta ve al principio de la reserva y que Diva recomienda. El descuento (0 = ninguno) se aplica solo si elige exactamente esos servicios.
+          <b> Los de ejemplo vienen sin descuento: ponlo tú si quieres.</b>
+        </p>
+        <div className="svc-list">
+          {packs.map((p) => (
+            <form key={p.id} action={savePackAction} className={`svc svc--pack ${p.active ? "" : "svc--off"}`}>
+              <input type="hidden" name="id" value={p.id} />
+              <label className="field field--emoji"><span>Emoji</span><input name="emoji" defaultValue={p.emoji} maxLength={8} required /></label>
+              <label className="field"><span>Nombre</span><input name="name" defaultValue={p.name} required maxLength={60} /></label>
+              <label className="field field--wide"><span>Descripción corta</span><input name="description" defaultValue={p.description ?? ""} maxLength={160} /></label>
+              <label className="field field--narrow"><span>Descuento %</span><input type="number" name="discount" min={0} max={90} defaultValue={p.discount_percent} /></label>
+              <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={p.sort} /></label>
+              <fieldset className="pack-edit"><legend>Servicios del pack</legend>
+                {services.filter((x) => x.active || p.service_slugs.includes(x.slug)).map((x) => (
+                  <label key={x.id} className="check"><input type="checkbox" name="services" value={x.slug} defaultChecked={p.service_slugs.includes(x.slug)} /><span>{x.name}</span></label>
+                ))}
+              </fieldset>
+              <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={p.active} /><span>Activo</span></label>
+              <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+              <button className="btn btn--ghost btn--sm" type="submit" formAction={deletePackAction}>Borrar</button>
+            </form>
+          ))}
+        </div>
+        <h3 className="svc__new">Añadir pack</h3>
+        <form action={addPackAction} className="svc svc--pack">
+          <label className="field field--emoji"><span>Emoji</span><input name="emoji" defaultValue="🎁" maxLength={8} required /></label>
+          <label className="field"><span>Nombre</span><input name="name" required maxLength={60} placeholder="Día de novia" /></label>
+          <label className="field field--wide"><span>Descripción corta</span><input name="description" maxLength={160} /></label>
+          <label className="field field--narrow"><span>Descuento %</span><input type="number" name="discount" min={0} max={90} defaultValue={0} /></label>
+          <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={100} /></label>
+          <fieldset className="pack-edit"><legend>Servicios del pack (mínimo 2)</legend>
+            {services.filter((x) => x.active).map((x) => (
+              <label key={x.id} className="check"><input type="checkbox" name="services" value={x.slug} /><span>{x.name}</span></label>
+            ))}
+          </fieldset>
+          <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Extras que suman tiempo</h2>
+        <p className="muted small">Retirada de esmalte, nail art… La clienta los marca al elegir hora y suman su duración y su precio a la cita. Si eliges una categoría, solo se ofrecen con servicios de esa categoría.</p>
+        <div className="svc-list">
+          {addons.map((a) => (
+            <form key={a.id} action={saveAddonAction} className={`svc ${a.active ? "" : "svc--off"}`}>
+              <input type="hidden" name="id" value={a.id} />
+              <label className="field"><span>Extra</span><input name="name" defaultValue={a.name} required maxLength={60} /></label>
+              <label className="field field--wide"><span>Descripción</span><input name="description" defaultValue={a.description ?? ""} maxLength={160} /></label>
+              <label className="field"><span>Duración (min)</span><input name="duration" type="number" min={5} max={240} step={5} defaultValue={a.duration_min} required /></label>
+              <label className="field"><span>Precio (€)</span><input name="price" inputMode="decimal" defaultValue={eur(a.price_cents)} required /></label>
+              <label className="field"><span>Se ofrece con</span>
+                <select name="category" defaultValue={a.category ?? ""}>
+                  <option value="">Cualquier servicio</option>
+                  {Array.from(new Set(services.map((s) => s.category))).map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </label>
+              <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={a.sort} /></label>
+              <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={a.active} /><span>Activo</span></label>
+              <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+              <button className="btn btn--ghost btn--sm" type="submit" formAction={deleteAddonAction}>Borrar</button>
+            </form>
+          ))}
+        </div>
+        <h3 className="svc__new">Añadir extra</h3>
+        <form action={addAddonAction} className="svc">
+          <label className="field"><span>Extra</span><input name="name" required maxLength={60} /></label>
+          <label className="field field--wide"><span>Descripción</span><input name="description" maxLength={160} /></label>
+          <label className="field"><span>Duración (min)</span><input name="duration" type="number" min={5} max={240} step={5} defaultValue={15} required /></label>
+          <label className="field"><span>Precio (€)</span><input name="price" inputMode="decimal" defaultValue="5" required /></label>
+          <label className="field"><span>Se ofrece con</span>
+            <select name="category" defaultValue="">
+              <option value="">Cualquier servicio</option>
+              {Array.from(new Set(services.map((s) => s.category))).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <label className="field field--narrow"><span>Orden</span><input type="number" name="sort" min={0} max={9999} defaultValue={100} /></label>
           <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
         </form>
       </section>

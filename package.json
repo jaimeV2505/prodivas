@@ -13,7 +13,9 @@
     "db:migrate": "node scripts/migrate.mjs",
     "test:e2e": "node scripts/e2e.mjs",
     "vercel-build": "node scripts/migrate.mjs && next build",
-    "audit:mobile": "node scripts/mobile-audit/run.cjs"
+    "audit:mobile": "node scripts/mobile-audit/run.cjs",
+    "test:unit": "tsx scripts/unit.ts",
+    "migrate": "node scripts/migrate.mjs"
   },
   "dependencies": {
     "framer-motion": "^12.0.0",

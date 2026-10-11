@@ -1,68 +1,77 @@
+import { PAIR_RULES, suggest } from "./combos";
 import { fmtDuration, fmtPrice } from "./format";
+import { fill, getDict, MONEY_LOCALE, type Dict, type Lang } from "./i18n";
 import type { Trend } from "./trends";
 
 /**
  * El «cerebro» de Diva, la chica del avatar. No usa inteligencia artificial ni servicios externos:
- * responde con reglas sencillas y con los datos reales del salón (servicios, precios, duraciones) y las
- * tendencias que la dueña edita en /admin/ajustes. Si no entiende algo, lo dice y ofrece el teléfono.
+ * responde con reglas sencillas y con los datos reales del salón (servicios, precios, duraciones, packs) y las
+ * tendencias que la dueña edita en /admin/ajustes. Entiende castellano, gallego e inglés y contesta en el
+ * idioma de la clienta. Si no entiende algo, lo dice y ofrece el teléfono.
  */
 export type DivaService = { slug: string; name: string; category: string; durationMin: number; priceCents: number };
-export type DivaCtx = { trends: Trend[]; services: DivaService[]; selected: string[]; step: string; address: string };
-export type DivaMsg = { text: string; action?: { label: string; slug: string } };
+export type DivaPack = { slug: string; name: string; serviceSlugs: string[]; discountPercent: number };
+export type DivaCtx = { lang: Lang; trends: Trend[]; services: DivaService[]; packs: DivaPack[]; selected: string[]; step: string; address: string };
+export type DivaAction = { label: string; slug: string; kind: "service" | "pack" };
+export type DivaMsg = { text: string; action?: DivaAction };
 /** Contadores para ir rotando tendencias y consejos sin repetir siempre lo mismo. */
 export type Rot = Record<string, number>;
 
 const norm = (s: string) => s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const PHONE = "670 424 348";
+const T = (c: DivaCtx): Dict => getDict(c.lang);
 
-export const QUICK: { label: string; q: string }[] = [
-  { label: "¿Qué se lleva? 🔥", q: "¿qué se lleva ahora?" },
-  { label: "Recomiéndame ✨", q: "recomiéndame algo" },
-  { label: "¿Cuánto dura?", q: "¿cuánto dura?" },
-  { label: "¿Cuánto cuesta?", q: "¿cuánto cuesta?" },
-];
+export const quickChips = (lang: Lang): { label: string; q: string }[] => {
+  const d = getDict(lang);
+  return [
+    { label: d.divaChipTrend, q: d.divaChipTrendQ },
+    { label: d.divaChipRec, q: d.divaChipRecQ },
+    { label: d.divaChipDur, q: d.divaChipDurQ },
+    { label: d.divaChipPrice, q: d.divaChipPriceQ },
+  ];
+};
 
-function offer(ctx: DivaCtx, slug: string | null | undefined): DivaMsg["action"] | undefined {
+const svc = (ctx: DivaCtx, slug: string) => ctx.services.find((s) => s.slug === slug);
+
+function offerService(ctx: DivaCtx, slug: string | null | undefined): DivaAction | undefined {
   if (!slug || ctx.selected.includes(slug)) return undefined;
-  const s = ctx.services.find((x) => x.slug === slug);
+  const s = svc(ctx, slug);
   if (!s) return undefined;
-  return { label: `${ctx.step === "service" || ctx.selected.length === 0 ? "Elegir" : "Añadir"} ${s.name}`, slug };
+  const first = ctx.step === "service" || ctx.selected.length === 0;
+  return { label: fill(first ? T(ctx).divaOfferChoose : T(ctx).divaOfferAdd, { name: s.name }), slug, kind: "service" };
 }
 
-export function trendMessage(t: Trend, ctx: DivaCtx): DivaMsg {
-  return { text: `${t.emoji} ${t.title}: ${t.body}`, action: offer(ctx, t.serviceSlug) };
+/** Tendencia con su texto en el idioma de la clienta (si la dueña ha traducido la tendencia; si no, en castellano). */
+export function trendMessage(tr: Trend, ctx: DivaCtx): DivaMsg {
+  const loc = ctx.lang === "es" ? undefined : tr.i18n?.[ctx.lang];
+  return { text: `${tr.emoji} ${loc?.title ?? tr.title}: ${loc?.body ?? tr.body}`, action: offerService(ctx, tr.serviceSlug) };
 }
 
 /** Siguiente tendencia (de un tema, o de cualquiera), rotando. */
 export function nextTrend(ctx: DivaCtx, rot: Rot, topic?: string): DivaMsg {
-  const list = topic ? ctx.trends.filter((t) => t.topic === topic) : ctx.trends;
-  if (!list.length) {
-    return { text: topic ? "De eso aún no tengo ninguna tendencia apuntada 🙈. Cuéntame qué te apetece y te aconsejo." : "Hoy no tengo tendencias nuevas que contarte 🙈. ¿Quieres que te recomiende algo?" };
-  }
+  const d = T(ctx);
+  const list = topic ? ctx.trends.filter((x) => x.topic === topic) : ctx.trends;
+  if (!list.length) return { text: topic ? d.divaNoTrendTopic : d.divaNoTrendAny };
   const k = topic ?? "all";
-  const t = list[(rot[k] ?? 0) % list.length];
+  const tr = list[(rot[k] ?? 0) % list.length];
   rot[k] = (rot[k] ?? 0) + 1;
-  const msg = trendMessage(t, ctx);
-  return { ...msg, text: `${msg.text} (tendencia orientativa de esta temporada)` };
+  const msg = trendMessage(tr, ctx);
+  return { ...msg, text: `${msg.text} ${d.divaTrendSuffix}` };
 }
 
-const PAIRS: { when: RegExp; then: string[]; text: string }[] = [
-  { when: /manicura/, then: ["pedicura-semipermanente", "pedicura"], text: "¿Te animas con una pedicura a juego? Manos y pies a juego es un clásico que nunca falla 💅" },
-  { when: /pedicura/, then: ["manicura-semipermanente", "manicura-clasica"], text: "¿Y unas manos a juego? Con los pies hechos, las uñas de las manos rematan el look ✨" },
-  { when: /lifting|pestanas/, then: ["tinte-cejas", "hilo-cejas"], text: "Con el lifting de pestañas, unas cejas arregladas rematan la mirada 👁️" },
-  { when: /cejas|microblading/, then: ["lifting-pestanas"], text: "Unas cejas bonitas y además el lifting de pestañas: mirada abierta sin esfuerzo 👁️" },
-];
-
-/** Un servicio que combina bien con lo que ya ha elegido. */
+/** Un servicio o un pack que combina bien con lo que ya ha elegido. */
 export function pairingTip(ctx: DivaCtx): DivaMsg | null {
-  for (const slug of ctx.selected) {
-    for (const r of PAIRS) {
-      if (!r.when.test(slug)) continue;
-      const pick = r.then.find((x) => ctx.services.some((s) => s.slug === x) && !ctx.selected.includes(x));
-      if (pick) return { text: r.text, action: offer(ctx, pick) };
-    }
+  const d = T(ctx);
+  const sg = suggest({ have: ctx.selected, catalog: ctx.services.map((s) => s.slug), packs: ctx.packs, maxServices: 6, max: 1 })[0];
+  if (!sg) return null;
+  if (sg.kind === "pack") {
+    const pk = ctx.packs.find((p) => p.slug === sg.packSlug);
+    if (!pk) return null;
+    const missing = sg.add.map((slug) => svc(ctx, slug)?.name).filter(Boolean).join(" + ");
+    const save = pk.discountPercent > 0 ? fill(d.divaPackTipSave, { percent: pk.discountPercent }) : "";
+    return { text: fill(d.divaPackTip, { missing, pack: pk.name, save }), action: { label: fill(d.divaOfferPack, { name: pk.name }), slug: pk.slug, kind: "pack" } };
   }
-  return null;
+  return { text: `${d[sg.reason]} 💖`, action: offerService(ctx, sg.add[0]) };
 }
 
 /** Servicios a los que se refiere la pregunta («el lifting», «la manicura»…). */
@@ -73,78 +82,106 @@ function mentioned(q: string, ctx: DivaCtx): DivaService[] {
 }
 
 function durationAnswer(ctx: DivaCtx, named: DivaService[] = []): DivaMsg {
+  const d = T(ctx);
   if (named.length) return { text: `${named.map((s) => `${s.name}: ${fmtDuration(s.durationMin)}`).join(" · ")} ⏱️` };
   const sel = ctx.services.filter((s) => ctx.selected.includes(s.slug));
   if (sel.length) {
     const total = sel.reduce((a, s) => a + s.durationMin, 0);
-    return { text: sel.length === 1 ? `${sel[0].name} dura ${fmtDuration(sel[0].durationMin)}. ⏱️` : `Tu visita dura ${fmtDuration(total)} en total: ${sel.map((s) => `${s.name} (${fmtDuration(s.durationMin)})`).join(", ")}. ⏱️` };
+    return { text: sel.length === 1 ? fill(d.divaDurOne, { name: sel[0].name, dur: fmtDuration(sel[0].durationMin) }) : fill(d.divaDurMany, { total: fmtDuration(total), list: sel.map((s) => `${s.name} (${fmtDuration(s.durationMin)})`).join(", ") }) };
   }
   const firsts = [...new Set(ctx.services.map((s) => s.category))].slice(0, 3).map((c) => ctx.services.find((s) => s.category === c)).filter((s): s is DivaService => !!s);
-  return { text: `Depende del servicio. Por ejemplo: ${firsts.map((s) => `${s.name} ${fmtDuration(s.durationMin)}`).join(", ")}. Elige uno y te digo el tiempo exacto.` };
+  return { text: fill(d.divaDurGeneric, { list: firsts.map((s) => `${s.name} ${fmtDuration(s.durationMin)}`).join(", ") }) };
 }
 
 function priceAnswer(ctx: DivaCtx, named: DivaService[] = []): DivaMsg {
-  if (named.length) return { text: `${named.map((s) => `${s.name}: ${fmtPrice(s.priceCents)}`).join(" · ")} 💶` };
+  const d = T(ctx);
+  const money = (c: number) => fmtPrice(c, MONEY_LOCALE[ctx.lang]);
+  if (named.length) return { text: `${named.map((s) => `${s.name}: ${money(s.priceCents)}`).join(" · ")} 💶` };
   const sel = ctx.services.filter((s) => ctx.selected.includes(s.slug));
   if (sel.length) {
     const total = sel.reduce((a, s) => a + s.priceCents, 0);
-    return { text: sel.length === 1 ? `${sel[0].name} cuesta ${fmtPrice(sel[0].priceCents)}. 💶` : `Tu visita suma ${fmtPrice(total)}: ${sel.map((s) => `${s.name} ${fmtPrice(s.priceCents)}`).join(", ")}. 💶` };
+    return { text: sel.length === 1 ? fill(d.divaPriceOne, { name: sel[0].name, price: money(sel[0].priceCents) }) : fill(d.divaPriceMany, { total: money(total), list: sel.map((s) => `${s.name} ${money(s.priceCents)}`).join(", ") }) };
   }
-  const cats = [...new Set(ctx.services.map((s) => s.category))].map((c) => {
-    const min = Math.min(...ctx.services.filter((s) => s.category === c).map((s) => s.priceCents));
-    return `${c} desde ${fmtPrice(min)}`;
-  });
-  return { text: `${cats.join(" · ")}. Elige un servicio y te doy el precio exacto. 💶` };
+  const cats = [...new Set(ctx.services.map((s) => s.category))].map((c) => fill(d.divaPriceFrom, { cat: c, price: money(Math.min(...ctx.services.filter((s) => s.category === c).map((s) => s.priceCents))) }));
+  return { text: fill(d.divaPriceGeneric, { list: cats.join(" · ") }) };
 }
 
 export function recommend(ctx: DivaCtx, rot: Rot): DivaMsg {
   const pair = pairingTip(ctx);
   if (pair) return pair;
-  const withService = ctx.trends.filter((t) => t.serviceSlug && ctx.services.some((s) => s.slug === t.serviceSlug) && !ctx.selected.includes(t.serviceSlug));
+  const withService = ctx.trends.filter((x) => x.serviceSlug && svc(ctx, x.serviceSlug) && !ctx.selected.includes(x.serviceSlug));
   if (withService.length) {
-    const t = withService[(rot.rec ?? 0) % withService.length];
+    const tr = withService[(rot.rec ?? 0) % withService.length];
     rot.rec = (rot.rec ?? 0) + 1;
-    return trendMessage(t, ctx);
+    return trendMessage(tr, ctx);
   }
-  return { text: "Cuéntame qué te apetece: ¿uñas, mirada o depilación? Y te cuento lo que se lleva ✨" };
+  return { text: T(ctx).divaRecNone };
 }
+
+// Palabras clave en castellano, gallego e inglés (sin acentos): se entiende a la clienta en cualquiera de los tres
+const RX = {
+  hello: /^(hola|ola|buenas|buenos|hey|ey|que tal|hello|hi\b|good (morning|afternoon|evening))/,
+  thanks: /gracias|grazas|thanks|thank you|genial|perfecto|guay|estupendo|great|^vale\b|^ok\b/,
+  price: /precio|prezo|cuesta|custa|cuanto vale|canto vale|tarifa|cuanto es\b|canto e\b|euros|coste|how much|price|cost|cuanto cobr|canto cobr/,
+  duration: /cuanto dura|canto dura|duracion|cuanto tarda|canto tarda|cuanto tiempo|canto tempo|how long|duration|\bdura\b|takes/,
+  several: /varios|varias|juntos|a la vez|seguid|separad|distint|diferent|otro dia|outro dia|otra hora|outra hora|por separado|several|together|separate|different day|back to back/,
+  packs: /\bpacks?\b|paquete|oferta|descuento|promo|combo|desconto|discount|deal|offer/,
+  extras: /\bextras?\b|retirada|nail art|parafina|add-?on|removal/,
+  companion: /acompan|amiga|madre|\bnai\b|friend|\bmum\b|\bmom\b|con alguien|con alguen|with someone|venimos|vengo con|vimos|vamos dous|come with/,
+  trends: /tendenc|moda|se lleva|se leva|de moda|novedad|ultimo|lo nuevo|nuevo|\bnovo\b|trend|trending|que hay|what.?s new|fashion|latest/,
+  recommend: /recomien|recomend|sugier|aconsej|que me hago|que me pongo|que elijo|no se que|advise|suggest|what should i/,
+  nails: /\bunas\b|unllas|manicur|esmalte|color|colour|pedicur|nail|polish/,
+  lashes: /pesta|lifting|mirada|lash|eyelash/,
+  brows: /ceja|cella|laminad|microblad|brow/,
+  wax: /depil|laser|\bcera\b|hilo|\bfio\b|thread|wax|hair removal/,
+  where: /donde|onde\b|direccion|ubicaci|llegar|chegar|como llego|melide|address|where|location|find you/,
+  cancel: /cancel|cambiar|mover|anular|change|move|reschedule/,
+  help: /ayuda|axuda|como funciona|como reserv|como va|help|how does|how do i/,
+  book: /cita|reserv|hueco|\boco\b|hoy|hoxe|manana|libre|disponib|book|appointment|available|today|tomorrow|slot/,
+  hours: /horario|abris|abre|cierra|hora de|opening|\bopen\b|hours|aberto/,
+};
 
 /** Contesta a lo que escribe la clienta. */
 export function answer(raw: string, ctx: DivaCtx, rot: Rot): DivaMsg {
+  const d = T(ctx);
   const q = norm(raw);
   const has = (re: RegExp) => re.test(q);
   const named = mentioned(q, ctx);
-  if (has(/^(hola|buenas|hey|buenos|ey|que tal)/)) return { text: "¡Hola! 💖 Soy Diva. Pregúntame por tendencias, precios o cuánto dura algo, o dime qué te apetece y te aconsejo." };
-  if (has(/gracias|genial|perfecto|guay|estupendo|^vale\b/)) return { text: "¡De nada! 💖 Aquí sigo por si necesitas algo más." };
-  if (has(/precio|cuesta|cuanto vale|tarifa|cuanto es|euros|coste|cuanto cobr/)) return priceAnswer(ctx, named);
-  if (has(/cuanto dura|duracion|cuanto tarda|cuanto tiempo|dura\b/)) return durationAnswer(ctx, named);
-  if (has(/varios|juntos|a la vez|seguid|separad|distint|diferent|otro dia|otra hora|por separado/)) {
-    return { text: "Si pides varios servicios puedes elegir «Todo seguido» (un solo bloque, sin esperas) o «Cada uno a su hora» (por ejemplo, uñas hoy y cejas el jueves). Lo ves justo encima del calendario cuando añades un segundo servicio 😉" };
+  if (has(RX.hello)) return { text: d.divaHello };
+  if (has(RX.thanks)) return { text: d.divaThanks };
+  if (has(RX.price)) return priceAnswer(ctx, named);
+  if (has(RX.duration)) return durationAnswer(ctx, named);
+  if (has(RX.several)) return { text: d.divaSeveral };
+  if (has(RX.packs)) {
+    const list = ctx.packs.map((p) => `${p.name}${p.discountPercent > 0 ? ` (−${p.discountPercent} %)` : ""}`).join(", ");
+    return { text: list ? fill(d.divaPacks, { list }) : d.divaPacksNone };
   }
-  const nails = /\bunas\b|manicur|esmalte|color|pedicur/;
-  if (has(/tendenc|moda|se lleva|de moda|novedad|ultimo|lo nuevo|nuevo|trend|que hay/)) {
-    if (has(/pesta|lifting|mirada/)) return nextTrend(ctx, rot, "lashes");
-    if (has(/ceja|laminad/)) return nextTrend(ctx, rot, "brows");
-    if (has(nails)) return nextTrend(ctx, rot, "nails");
+  if (has(RX.extras)) return { text: d.divaExtras };
+  if (has(RX.companion)) return { text: d.divaCompanion };
+  if (has(RX.trends)) {
+    if (has(RX.lashes)) return nextTrend(ctx, rot, "lashes");
+    if (has(RX.brows)) return nextTrend(ctx, rot, "brows");
+    if (has(RX.nails)) return nextTrend(ctx, rot, "nails");
     return nextTrend(ctx, rot);
   }
-  if (has(/recomien|sugier|aconsej|que me hago|no se que|que me pongo|que elijo/)) return recommend(ctx, rot);
-  if (has(nails)) return nextTrend(ctx, rot, "nails");
-  if (has(/pesta|lifting/)) return nextTrend(ctx, rot, "lashes");
-  if (has(/ceja|laminad|microblad/)) return nextTrend(ctx, rot, "brows");
-  if (has(/depil|laser|\bcera\b|hilo/)) {
-    const w = ctx.services.filter((s) => s.category.toLowerCase().includes("depil"));
-    return w.length ? { text: `En depilación tenemos: ${w.map((s) => `${s.name} (${fmtPrice(s.priceCents)}, ${fmtDuration(s.durationMin)})`).join(", ")}.` } : { text: `De depilación te cuenta todo el equipo por teléfono: ${PHONE}.` };
+  if (has(RX.recommend)) return recommend(ctx, rot);
+  if (has(RX.nails)) return nextTrend(ctx, rot, "nails");
+  if (has(RX.lashes)) return nextTrend(ctx, rot, "lashes");
+  if (has(RX.brows)) return nextTrend(ctx, rot, "brows");
+  if (has(RX.wax)) {
+    const w = ctx.services.filter((s) => /depil|hair removal|hair-removal/.test(norm(s.category)));
+    const money = (c: number) => fmtPrice(c, MONEY_LOCALE[ctx.lang]);
+    return w.length ? { text: fill(d.divaWaxList, { list: w.map((s) => `${s.name} (${money(s.priceCents)}, ${fmtDuration(s.durationMin)})`).join(", ") }) } : { text: fill(d.divaWaxPhone, { phone: PHONE }) };
   }
-  if (has(/donde|direccion|ubicaci|llegar|como llego|melide/)) return { text: `Estamos en ${ctx.address} 📍` };
-  if (has(/cancel|cambiar|mover|anular/)) return { text: "Puedes cancelar o cambiar la hora desde el enlace del mensaje de confirmación. Si cancelas, otra persona podrá aprovechar el hueco 💖" };
-  if (has(/cita|reserv|hueco|hoy|manana|libre|disponib/)) return { text: "¡Claro! Elige lo que te hacemos y te enseño los huecos libres, que son reales. Si quieres, te cuento qué se lleva mientras eliges 😉" };
-  if (has(/ayuda|como funciona|como reserv|como va/)) return { text: "Muy fácil: 1) elige lo que te hacemos, 2) elige un hueco (te lo guardamos unos minutos) y 3) pon tus datos. ¡Y listo! 🎉" };
-  if (has(/horario|abris|abre|cierra|hora de/)) return { text: `Todos los huecos que ves en el calendario son reales y están libres. Para algo especial, llámanos al ${PHONE} 📞` };
-  return { text: `Mmm, de eso no sé mucho 🙈. Pregúntame por tendencias, precios o cuánto dura algo; para lo demás, llámanos al ${PHONE}.` };
+  if (has(RX.where)) return { text: fill(d.divaWhere, { address: ctx.address }) };
+  if (has(RX.cancel)) return { text: d.divaCancel };
+  if (has(RX.help)) return { text: d.divaHowTo };
+  if (has(RX.book)) return { text: d.divaBookNow };
+  if (has(RX.hours)) return { text: fill(d.divaHours, { phone: PHONE }) };
+  return { text: fill(d.divaFallback, { phone: PHONE }) };
 }
 
-/** Lo que Diva dice sola de vez en cuando: tendencias y consejos según lo que lleva elegido. */
+/** Lo que Diva dice sola de vez en cuando: packs, consejos y tendencias según lo que lleva elegido. */
 export function spontaneous(ctx: DivaCtx, rot: Rot): DivaMsg {
   const n = rot.auto ?? 0;
   rot.auto = n + 1;
@@ -152,6 +189,8 @@ export function spontaneous(ctx: DivaCtx, rot: Rot): DivaMsg {
     const tip = pairingTip(ctx);
     if (tip) return tip;
   }
-  const t = nextTrend(ctx, rot);
-  return { ...t, text: `Lo último: ${t.text}` };
+  const tr = nextTrend(ctx, rot);
+  return { ...tr, text: `${T(ctx).divaLatest} ${tr.text}` };
 }
+
+export { PAIR_RULES };

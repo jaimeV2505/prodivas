@@ -2,13 +2,16 @@ import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { createHold, hashIp } from "@/lib/bookings";
 import { clientIp, respond } from "@/lib/http";
+import { MAX_SERVICES } from "@/lib/visit";
 
 export const dynamic = "force-dynamic";
 
 const Body = z
   .object({
     serviceId: z.number().int().positive().optional(),
-    serviceIds: z.array(z.number().int().positive()).min(1).max(4).optional(),
+    serviceIds: z.array(z.number().int().positive()).min(1).max(MAX_SERVICES).optional(),
+    addonIds: z.array(z.number().int().positive()).max(6).optional(),
+    packageSlug: z.string().regex(/^[a-z0-9-]{1,60}$/).nullable().optional(),
     staffId: z.number().int().positive().nullable().optional(),
     startsAt: z.string().datetime({ offset: true }),
     replaceHoldId: z.string().uuid().optional(),
@@ -27,6 +30,8 @@ export async function POST(req: NextRequest) {
       ipHash: hashIp(clientIp(req)),
       replace: b.replaceHoldId && b.replaceToken ? { holdId: b.replaceHoldId, holdToken: b.replaceToken } : undefined,
       extend: b.extend,
+      addonIds: b.addonIds,
+      packageSlug: b.packageSlug ?? null,
     });
   });
 }

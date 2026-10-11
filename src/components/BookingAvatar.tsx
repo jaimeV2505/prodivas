@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { answer, nextTrend, QUICK, spontaneous, type DivaCtx, type DivaMsg, type Rot } from "@/lib/diva";
+import { answer, nextTrend, quickChips, spontaneous, type DivaAction, type DivaCtx, type DivaMsg, type Rot } from "@/lib/diva";
+import { fill, getDict, type Lang } from "@/lib/i18n";
 import type { Trend } from "@/lib/trends";
 
 /**
@@ -12,36 +13,30 @@ import type { Trend } from "@/lib/trends";
  */
 export type AvatarState = "browse" | "held" | "typing" | "done";
 type Result = "added" | "chosen" | "already" | "full" | "missing";
-type Line = { from: "you" | "diva"; text: string; action?: DivaMsg["action"]; used?: boolean };
+type Line = { from: "you" | "diva"; text: string; action?: DivaAction; used?: boolean };
 
 type Props = {
   state: AvatarState;
+  lang: Lang;
   trends: Trend[];
   services: { slug: string; name: string; category: string; durationMin: number; priceCents: number }[];
+  packs: { slug: string; name: string; serviceSlugs: string[]; discountPercent: number }[];
   selected: string[];
   step: string;
   address: string;
-  onAdd: (slug: string) => Result;
+  /** Hay visitas anteriores guardadas en este móvil: Diva da la bienvenida. */
+  history: boolean;
+  onAdd: (slug: string, kind: "service" | "pack") => Result;
 };
 
-const STATE_MSG: Record<AvatarState, string> = {
-  browse: "¡Hola! Soy Diva 💖 Elige con calma, que yo te cuento qué se lleva.",
-  held: "¡Hueco guardado para ti! Ahora solo faltan tus datos 🎉",
-  typing: "Casi lista, solo tus datos… ✍️",
-  done: "¡Cita confirmada! Qué ganas de verte 💖",
-};
-const ADDED: Record<Result, string> = {
-  added: "¡Hecho! Lo añadí a tu visita 💖",
-  chosen: "¡Perfecto, elegido! 💅",
-  already: "Eso ya lo tienes en tu visita 😉",
-  full: "Tu visita ya tiene 4 servicios. Ese sería para la próxima 😅",
-  missing: "Ahora no puedo añadirlo desde aquí. Hazlo en el paso de elegir hueco 🙈",
-};
 const IDLE_MS = 24000; // cada cuánto habla sola
 const MAX_SPONTANEOUS = 6; // y cuántas veces seguidas sin que le contesten
 
-export default function BookingAvatar({ state, trends, services, selected, step, address, onAdd }: Props) {
-  const [log, setLog] = useState<Line[]>([{ from: "diva", text: STATE_MSG[state] }]);
+export default function BookingAvatar({ state, lang, trends, services, packs, selected, step, address, history, onAdd }: Props) {
+  const T = getDict(lang);
+  const STATE_MSG: Record<AvatarState, string> = { browse: T.divaStateBrowse, held: T.divaStateHeld, typing: T.divaStateTyping, done: T.divaStateDone };
+  const ADDED: Record<Result, string> = { added: T.divaAdded, chosen: T.divaChosen, already: T.divaAlready, full: T.divaFull, missing: T.divaMissing };
+  const [log, setLog] = useState<Line[]>([{ from: "diva", text: T.divaStateBrowse }]);
   const [thinking, setThinking] = useState(false);
   const [talking, setTalking] = useState(false);
   const [cheer, setCheer] = useState(false);
@@ -52,8 +47,8 @@ export default function BookingAvatar({ state, trends, services, selected, step,
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // El contexto cambia a cada paso: se lee siempre el último desde una referencia
-  const ctxRef = useRef<DivaCtx>({ trends, services, selected, step, address });
-  ctxRef.current = { trends, services, selected, step, address };
+  const ctxRef = useRef<DivaCtx>({ lang, trends, services, packs, selected, step, address });
+  ctxRef.current = { lang, trends, services, packs, selected, step, address };
 
   const later = (fn: () => void, ms: number) => {
     const t = setTimeout(fn, ms);
@@ -83,6 +78,21 @@ export default function BookingAvatar({ state, trends, services, selected, step,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
+
+  // Bienvenida a quien ya ha reservado antes desde este móvil (solo una vez, y solo mientras elige)
+  const welcomed = useRef(false);
+  useEffect(() => {
+    if (!history || welcomed.current || state !== "browse") return;
+    welcomed.current = true;
+    let name = "";
+    try {
+      name = (JSON.parse(localStorage.getItem("pd_profile") ?? "{}") as { name?: string }).name?.split(" ")[0] ?? "";
+    } catch {
+      /* sin perfil */
+    }
+    say({ text: name ? fill(T.divaReturn, { name }) : T.divaFriendly });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [history]);
 
   // Habla sola de vez en cuando (tendencias y consejos), salvo cuando está escribiendo sus datos o ya terminó
   useEffect(() => {
@@ -119,7 +129,7 @@ export default function BookingAvatar({ state, trends, services, selected, step,
     const line = log[i];
     if (!line?.action || line.used) return;
     lastTouch.current = Date.now();
-    const r = onAdd(line.action.slug);
+    const r = onAdd(line.action.slug, line.action.kind);
     setLog((l) => l.map((x, j) => (j === i ? { ...x, used: r === "added" || r === "chosen" || r === "already" } : x)));
     say({ text: ADDED[r] });
     if (r === "added" || r === "chosen") {
@@ -142,16 +152,16 @@ export default function BookingAvatar({ state, trends, services, selected, step,
   const diva = log[lastDivaIdx];
 
   return (
-    <section className={`avatar avatar--${state} ${talking || thinking ? "avatar--talking" : ""} ${cheer ? "avatar--cheer" : ""}`} aria-label="Diva, tu ayudante para reservar">
+    <section className={`avatar avatar--${state} ${talking || thinking ? "avatar--talking" : ""} ${cheer ? "avatar--cheer" : ""}`} aria-label={T.divaRegion}>
       <div className="avatar__chat" aria-live="polite">
         {lastYouIdx >= 0 && log[lastYouIdx].from === "you" && <p className="avatar__you">{log[lastYouIdx].text}</p>}
         {thinking ? (
-          <p className="avatar__bubble avatar__bubble--typing" aria-label="Diva está escribiendo">
+          <p className="avatar__bubble avatar__bubble--typing" aria-label={T.divaTyping}>
             <i /><i /><i />
           </p>
         ) : (
           <p className="avatar__bubble" key={lastDivaIdx}>
-            <span className="avatar__name">Diva</span>
+            <span className="avatar__name">{T.divaName}</span>
             {diva.text}
           </p>
         )}
@@ -162,22 +172,22 @@ export default function BookingAvatar({ state, trends, services, selected, step,
         )}
       </div>
 
-      <button type="button" className="avatar__poke" onClick={poke} aria-label="Toca a Diva para ver una tendencia">
+      <button type="button" className="avatar__poke" onClick={poke} aria-label={T.divaPoke}>
         <AvatarArt />
       </button>
 
       <div className="avatar__ask">
         <div className="avatar__chips">
-          {QUICK.map((c) => (
+          {quickChips(lang).map((c) => (
             <button key={c.label} type="button" className="avatar__chip" onClick={() => ask(c.q)} disabled={thinking}>
               {c.label}
             </button>
           ))}
         </div>
         <form className="avatar__form" onSubmit={onSubmit}>
-          <label className="sr-only" htmlFor="diva-q">Pregúntale a Diva</label>
-          <input id="diva-q" value={text} onChange={(e) => setText(e.target.value)} maxLength={120} placeholder="Pregúntale a Diva…" autoComplete="off" enterKeyHint="send" />
-          <button type="submit" className="avatar__send" disabled={!text.trim() || thinking}>Enviar</button>
+          <label className="sr-only" htmlFor="diva-q">{T.divaAsk}</label>
+          <input id="diva-q" value={text} onChange={(e) => setText(e.target.value)} maxLength={120} placeholder={T.divaPlaceholder} autoComplete="off" enterKeyHint="send" />
+          <button type="submit" className="avatar__send" disabled={!text.trim() || thinking}>{T.divaSend}</button>
         </form>
       </div>
     </section>

@@ -118,6 +118,22 @@ Las fotos están en `public/images/` y se registran en `src/lib/media.ts`:
 
 Configuración de cuentas (Telegram, Twilio, Resend, Meta, Stripe, GitHub): **`docs/SETUP.md`**.
 
+## Reserva completa: packs, extras, acompañante, atajos, retoque, idiomas y señal inteligente
+
+Todo se gestiona en `/admin/ajustes` (no hace falta tocar código):
+
+- **Packs:** combinaciones ya organizadas («Manos y pies», «Mirada completa», «Express») que la clienta ve al principio de la reserva y que Diva recomienda. El descuento (0–90 %) se aplica solo si elige **exactamente** esos servicios; el servidor lo comprueba y guarda el precio ya rebajado. **Los de ejemplo vienen sin descuento: ponlo tú si quieres.** Al elegir un servicio se sugiere lo que combina o completa un pack.
+- **Extras que suman tiempo:** retirada de esmalte, nail art… suman duración y precio y se tienen en cuenta al calcular los huecos y al cambiar la hora. Si eliges una categoría, solo se ofrecen con servicios de esa categoría.
+- **«Venimos 2»:** la acompañante añade sus servicios al mismo bloque (el mismo servicio puede repetirse); su nombre llega al salón en los comentarios. Hasta 6 servicios en un bloque (4 si van en horas distintas).
+- **Atajos:** «lo antes posible», «esta tarde» y «como siempre» (día y hora habituales según las visitas anteriores **guardadas en ese móvil**), y «repetir lo de la última vez».
+- **Retoque automático:** cada servicio puede llevar «retoque (semanas)». Al confirmar, se propone el mismo día de la semana y hora N semanas después (calculado en hora local: no se descuadra con el cambio de hora) y se reserva con un toque; si no hay hueco, ofrece los más cercanos.
+- **Señal inteligente:** «Según el servicio» (como siempre) o «Solo a quien ya ha faltado» (con N plantones y un importe por defecto si el servicio no lleva señal; los servicios marcados «Señal siempre» la piden a todas). A la clienta nunca se le enseña su historial: solo se le avisa de que, si ha faltado antes, se le pedirá una señal. Solo actúa con Stripe activo.
+- **Casillas de seguridad (láser, microblading):** el servicio lleva «casillas de seguridad» y la reserva (también el modo fácil) no se confirma sin marcarlas. **Solo se guarda que las marcó y cuándo, nunca datos de salud.** Los textos están en `src/lib/i18n/es.ts` (`laser1…`, `microblading1…`): **revísalos con tu gestor.**
+- **Idiomas:** castellano, gallego e inglés en toda la reserva (selector arriba a la derecha; la reserva en curso no se pierde al cambiar). Los servicios de ejemplo, los extras, los packs y las tendencias de ejemplo vienen traducidos; lo que añadas tú se muestra en castellano hasta que lo traduzcas (servicios: `src/lib/i18n/services.ts`; extras, packs y tendencias: columna `i18n`). **El gallego y el inglés conviene que los revise una persona nativa.** No cubren la portada, el modo fácil ni el panel.
+- **Migración:** esta versión usa columnas y tablas nuevas. En Vercel (`vercel-build`) y en Docker se aplica sola al desplegar; si lo haces a mano, `npm run db:migrate`. Sin la migración, reservar fallaría (la pantalla de reservar tiene un respaldo, pero no el motor).
+
+Pruebas: `npm run test:unit` (32 pruebas de la lógica: idiomas, packs, Diva, «como siempre», señal inteligente; no necesita base de datos) · `npm run audit:mobile` (navegador, 76 comprobaciones) · `npm run test:e2e` (con base de datos real: extras, pack con descuento, casillas, tope de citas, grupos…; **sin ejecutar desde aquí**).
+
 ## Auditoría de visitas con varios servicios
 
 Cómo funciona (y qué se corrigió):

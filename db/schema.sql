@@ -269,3 +269,111 @@ SELECT * FROM (VALUES
   ('🪶', 'Cejas naturales y luminosas', 'Cejas naturales pero cuidadas, un poco más claras y menos marcadas. Adiós a las cejas ultradefinidas.', 'brows', 'hilo-cejas', 80)
 ) AS v(emoji, title, body, topic, service_slug, sort)
 WHERE NOT EXISTS (SELECT 1 FROM trends);
+
+-- =====================================================================
+-- Reserva más completa: extras, packs, consentimientos, retoque y señal inteligente
+-- =====================================================================
+
+-- Los extras (retirada de esmalte, nail art…) se guardan como filas de la cita, sin servicio asociado
+ALTER TABLE booking_services ALTER COLUMN service_id DROP NOT NULL;
+ALTER TABLE booking_services ADD COLUMN IF NOT EXISTS is_addon boolean NOT NULL DEFAULT false;
+
+-- Extras que suman tiempo y precio a una visita
+CREATE TABLE IF NOT EXISTS addons (
+  id           serial PRIMARY KEY,
+  slug         text    NOT NULL UNIQUE,
+  name         text    NOT NULL,
+  description  text,
+  duration_min int     NOT NULL CHECK (duration_min > 0),
+  price_cents  int     NOT NULL CHECK (price_cents >= 0),
+  category     text,                       -- solo se ofrece con servicios de esta categoría (NULL = con cualquiera)
+  i18n         jsonb   NOT NULL DEFAULT '{}',
+  active       boolean NOT NULL DEFAULT true,
+  sort         int     NOT NULL DEFAULT 100
+);
+INSERT INTO addons (slug, name, description, duration_min, price_cents, category, i18n, sort)
+SELECT * FROM (VALUES
+  ('retirada-semipermanente', 'Retirada de semipermanente', 'Si llevas esmalte semipermanente de otro sitio o de hace semanas.', 15, 500, 'Manicura y pedicura',
+    '{"en":{"name":"Gel polish removal","description":"If you are wearing gel polish from elsewhere or from weeks ago."},"gl":{"name":"Retirada de semipermanente","description":"Se levas esmalte semipermanente doutro sitio ou de hai semanas."}}'::jsonb, 10),
+  ('nail-art-sencillo', 'Nail art sencillo', 'Un detalle en unas pocas uñas: puntitos, línea fina, micro french.', 15, 500, 'Manicura y pedicura',
+    '{"en":{"name":"Simple nail art","description":"A small detail on a few nails: dots, fine line, micro french."},"gl":{"name":"Nail art sinxelo","description":"Un detalle nalgunhas unllas: puntiños, liña fina, micro french."}}'::jsonb, 20),
+  ('nail-art-elaborado', 'Nail art elaborado', 'Diseño trabajado en todas las uñas.', 30, 1000, 'Manicura y pedicura',
+    '{"en":{"name":"Detailed nail art","description":"Detailed design on all nails."},"gl":{"name":"Nail art elaborado","description":"Deseño traballado en todas as unllas."}}'::jsonb, 30),
+  ('parafina', 'Hidratación con parafina', 'Manos o pies muy suaves.', 10, 400, 'Manicura y pedicura',
+    '{"en":{"name":"Paraffin treatment","description":"Very soft hands or feet."},"gl":{"name":"Hidratación con parafina","description":"Mans ou pés moi suaves."}}'::jsonb, 40),
+  ('tinte-pestanas', 'Tinte de pestañas', 'Pestañas más oscuras y definidas.', 15, 500, 'Mirada',
+    '{"en":{"name":"Lash tint","description":"Darker, more defined lashes."},"gl":{"name":"Tinte de pestanas","description":"Pestanas máis escuras e definidas."}}'::jsonb, 50)
+) AS v(slug, name, description, duration_min, price_cents, category, i18n, sort)
+WHERE NOT EXISTS (SELECT 1 FROM addons);
+
+-- Packs: combinaciones ya pensadas (con descuento opcional; 0 = sin descuento). Ejemplos: ajústalos en /admin/ajustes
+CREATE TABLE IF NOT EXISTS packages (
+  id               serial PRIMARY KEY,
+  slug             text    NOT NULL UNIQUE,
+  name             text    NOT NULL,
+  emoji            text    NOT NULL DEFAULT '✨',
+  description      text,
+  service_slugs    text[]  NOT NULL,
+  discount_percent int     NOT NULL DEFAULT 0 CHECK (discount_percent BETWEEN 0 AND 90),
+  i18n             jsonb   NOT NULL DEFAULT '{}',
+  active           boolean NOT NULL DEFAULT true,
+  sort             int     NOT NULL DEFAULT 100
+);
+INSERT INTO packages (slug, name, emoji, description, service_slugs, discount_percent, i18n, sort)
+SELECT * FROM (VALUES
+  ('manos-y-pies', 'Manos y pies', '💅', 'Manicura y pedicura semipermanente, a juego y en una sola visita.', ARRAY['manicura-semipermanente','pedicura-semipermanente'], 0,
+    '{"en":{"name":"Hands & feet","description":"Gel manicure and pedicure, matching, in a single visit."},"gl":{"name":"Mans e pés","description":"Manicura e pedicura semipermanente, a xogo e nunha soa visita."}}'::jsonb, 10),
+  ('mirada-completa', 'Mirada completa', '👁️', 'Lifting de pestañas, tinte y diseño de cejas: mirada de revista.', ARRAY['lifting-pestanas','tinte-cejas','hilo-cejas'], 0,
+    '{"en":{"name":"Complete eye look","description":"Lash lift, brow tint and brow shaping: magazine-ready eyes."},"gl":{"name":"Mirada completa","description":"Lifting de pestanas, tinte e deseño de cellas: mirada de revista."}}'::jsonb, 20),
+  ('express', 'Express', '⚡', 'Manicura clásica y cejas con hilo: lo básico en una visita corta.', ARRAY['manicura-clasica','hilo-cejas'], 0,
+    '{"en":{"name":"Express","description":"Classic manicure and threaded brows: the essentials in a short visit."},"gl":{"name":"Exprés","description":"Manicura clásica e cellas con fío: o básico nunha visita curta."}}'::jsonb, 30)
+) AS v(slug, name, emoji, description, service_slugs, discount_percent, i18n, sort)
+WHERE NOT EXISTS (SELECT 1 FROM packages);
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS package_slug text;
+-- Solo se guarda QUE confirmó las casillas de seguridad (y cuándo), nunca datos de salud
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS consent_acks text[];
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS consent_at timestamptz;
+
+-- Columnas nuevas de servicios. Los valores iniciales se ponen UNA sola vez (al crear la columna): si luego los cambias, no se pisan.
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'services' AND column_name = 'consent_kind') THEN
+    ALTER TABLE services ADD COLUMN consent_kind text;   -- 'laser' | 'microblading' | NULL
+    UPDATE services SET consent_kind = 'laser' WHERE slug LIKE 'laser-%';
+    UPDATE services SET consent_kind = 'microblading' WHERE slug = 'microblading';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'services' AND column_name = 'rebook_weeks') THEN
+    ALTER TABLE services ADD COLUMN rebook_weeks int CHECK (rebook_weeks IS NULL OR rebook_weeks BETWEEN 1 AND 26);  -- semanas hasta el retoque
+    UPDATE services SET rebook_weeks = 3 WHERE slug = 'manicura-semipermanente';
+    UPDATE services SET rebook_weeks = 4 WHERE slug = 'pedicura-semipermanente';
+    UPDATE services SET rebook_weeks = 6 WHERE slug = 'lifting-pestanas';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'services' AND column_name = 'deposit_always') THEN
+    ALTER TABLE services ADD COLUMN deposit_always boolean NOT NULL DEFAULT false;  -- señal para todas, aunque nunca hayan faltado
+    UPDATE services SET deposit_always = true WHERE deposit_cents > 0;               -- se mantiene lo que había
+  END IF;
+END $$;
+
+-- Señal inteligente: 'service' = como hasta ahora; 'repeat' = solo a quien ya ha faltado (y a los servicios marcados «siempre»)
+INSERT INTO settings (key, value) VALUES ('deposit_policy', 'service') ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('deposit_after_no_shows', '1') ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('deposit_default_cents', '1000') ON CONFLICT (key) DO NOTHING;
+
+-- Traducciones (inglés y gallego) de las tendencias de ejemplo
+ALTER TABLE trends ADD COLUMN IF NOT EXISTS i18n jsonb NOT NULL DEFAULT '{}';
+UPDATE trends SET i18n = '{"en":{"title":"Burgundy with a glow finish","body":"Burgundy and wine shades rule this autumn, best with a glow top coat for a flawless shine."},"gl":{"title":"Burdeos con brillo glow","body":"Os tons burdeos e viño mandan este outono, mellor cun top coat glow para un brillo impecable."}}'::jsonb
+  WHERE title = 'Burdeos con brillo glow' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Chocolate brown and latte","body":"Chocolate brown, latte and caramel are the warm neutrals of the season. Quiet luxury on your nails."},"gl":{"title":"Marrón chocolate e latte","body":"O marrón chocolate, o café con leite e o caramelo son os neutros cálidos da tempada. Luxo silencioso nas unllas."}}'::jsonb
+  WHERE title = 'Marrón chocolate y latte' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Mauve and dusty pink","body":"Dusty pinks and mauves: soft but with personality, perfect for the shift from summer to autumn."},"gl":{"title":"Malva e rosa empoeirado","body":"Rosas empoeirados e malvas: suaves pero con personalidade, perfectos para pasar do verán ao outono."}}'::jsonb
+  WHERE title = 'Malva y rosa empolvado' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Olive or moss green","body":"Olive and moss green sneak in as the sensation of the season: calm and very original."},"gl":{"title":"Verde oliva ou musgo","body":"O verde oliva e o verde musgo cólanse como sensación da tempada: calma e moita orixinalidade."}}'::jsonb
+  WHERE title = 'Verde oliva o musgo' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Micro french and dots","body":"Discreet designs: micro french, fine lines, dots or a detail on a single nail. Little, but very well done."},"gl":{"title":"Micro french e puntiños","body":"Deseños discretos: micro french, liñas finas, puntiños ou un detalle nunha soa unlla. Pouco, pero moi ben feito."}}'::jsonb
+  WHERE title = 'Micro french y puntitos' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Short or medium nails","body":"Short or medium nails are the most practical of the autumn, and with a good colour they look very elegant."},"gl":{"title":"Unllas curtas ou medias","body":"As unllas curtas ou medias son as máis prácticas do outono e cunha boa cor ven moi elegantes."}}'::jsonb
+  WHERE title = 'Uñas cortas o medias' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Lash lift","body":"Open, awake eyes without extensions or mascara. The effect usually lasts 6 to 8 weeks."},"gl":{"title":"Lifting de pestanas","body":"Mirada aberta e esperta sen extensións nin máscara. O efecto adoita durar entre 6 e 8 semanas."}}'::jsonb
+  WHERE title = 'Lifting de pestañas' AND i18n = '{}'::jsonb;
+UPDATE trends SET i18n = '{"en":{"title":"Natural, luminous brows","body":"Natural but well-groomed brows, a little lighter and less sharply defined. Goodbye to ultra-defined brows."},"gl":{"title":"Cellas naturais e luminosas","body":"Cellas naturais pero coidadas, un pouco máis claras e menos marcadas. Adeus ás cellas ultradefinidas."}}'::jsonb
+  WHERE title = 'Cejas naturales y luminosas' AND i18n = '{}'::jsonb;

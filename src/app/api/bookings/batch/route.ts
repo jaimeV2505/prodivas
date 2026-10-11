@@ -13,6 +13,7 @@ const Body = z.object({
   phone: z.string().trim().regex(/^[+\d][\d\s().-]{7,17}$/, "Escribe un teléfono válido"),
   email: z.string().trim().email("Revisa tu email").max(120).optional().or(z.literal("")),
   notes: z.string().trim().max(500).optional(),
+  acks: z.array(z.enum(["laser", "microblading"])).max(4).optional(), // casillas de seguridad marcadas
   website: z.string().optional(), // honeypot
 });
 
@@ -21,7 +22,7 @@ export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
     if (b.website) throw new BookingError("INVALID", "No hemos podido procesar la solicitud.");
-    const r = await confirmGroup({ legs: b.legs, name: b.name, phone: b.phone, email: b.email || null, notes: b.notes || null });
+    const r = await confirmGroup({ legs: b.legs, name: b.name, phone: b.phone, email: b.email || null, notes: b.notes || null, acks: b.acks });
     if (r.checkoutUrl) return { bookings: r.bookings, checkoutUrl: r.checkoutUrl };
     if (r.fresh) {
       after(async () => {

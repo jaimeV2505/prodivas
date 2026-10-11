@@ -43,10 +43,10 @@ export default async function BookingDetail({
   const b = await getSummaryById(id);
   if (!b) return notFound();
 
-  const [staff, parts, log, local] = await Promise.all([
+  const [staff, parts, log, local, extra] = await Promise.all([
     query<{ id: number; name: string }>(`SELECT id, name FROM staff WHERE active ORDER BY sort, id`),
-    query<{ name: string; duration_min: number; price_cents: number; deposit_cents: number }>(
-      `SELECT name, duration_min, price_cents, deposit_cents FROM booking_services WHERE booking_id = $1::uuid ORDER BY position`,
+    query<{ name: string; duration_min: number; price_cents: number; deposit_cents: number; is_addon: boolean }>(
+      `SELECT name, duration_min, price_cents, deposit_cents, is_addon FROM booking_services WHERE booking_id = $1::uuid ORDER BY position`,
       [id],
     ),
     query<{ kind: string; channel: string; status: string; delivery_status: string | null; detail: string | null; at: string }>(
@@ -58,6 +58,10 @@ export default async function BookingDetail({
       `SELECT to_char(starts_at AT TIME ZONE $2::text, 'YYYY-MM-DD') AS day, to_char(starts_at AT TIME ZONE $2::text, 'HH24:MI') AS time FROM bookings WHERE id = $1::uuid`,
       [id, CONFIG.tz],
     ),
+    query<{ package_slug: string | null; consent_acks: string[] | null; consent_at: string | null }>(
+      `SELECT package_slug, consent_acks, to_char(consent_at AT TIME ZONE $2::text, 'DD/MM/YYYY HH24:MI') AS consent_at FROM bookings WHERE id = $1::uuid`,
+      [id, CONFIG.tz],
+    ).catch(() => []),
   ]);
   const active = b.status === "CONFIRMED";
   const back = `/admin/cita/${id}`;
@@ -83,7 +87,11 @@ export default async function BookingDetail({
           </dd>
           {b.notes && (<><dt>Comentarios</dt><dd>{b.notes}</dd></>)}
           <dt>Servicios</dt>
-          <dd>{parts.map((p) => `${p.name} (${fmtDuration(p.duration_min)}, ${fmtPrice(p.price_cents)})`).join(" + ")} · Total {fmtPrice(b.priceCents)}</dd>
+          <dd>
+            {parts.map((p) => `${p.is_addon ? "＋ extra: " : ""}${p.name} (${fmtDuration(p.duration_min)}, ${fmtPrice(p.price_cents)})`).join(" + ")} · Total {fmtPrice(b.priceCents)}
+            {extra[0]?.package_slug && <><br />🎁 Pack «{extra[0].package_slug}» (descuento ya aplicado)</>}
+            {extra[0]?.consent_acks?.length ? <><br />✔ Confirmó las casillas de seguridad ({extra[0].consent_acks.join(", ")}) el {extra[0].consent_at}</> : null}
+          </dd>
           <dt>Señal</dt>
           <dd>{b.depositCents > 0 ? `${fmtPrice(b.depositCents)} · ${DEPOSIT[b.depositStatus] ?? b.depositStatus}` : "No lleva"}</dd>
           <dt>Código</dt><dd>{b.code}</dd>

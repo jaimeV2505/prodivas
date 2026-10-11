@@ -7,10 +7,25 @@ const SERVICES = [
   [1, "manicura-semipermanente", "Manicura semipermanente", "Manicura y pedicura", "Limado, cutículas y esmaltado semipermanente.", 45, 1800, 0],
   [2, "manicura-clasica", "Manicura clásica", "Manicura y pedicura", "Limado, cutículas y esmalte tradicional.", 30, 1200, 0],
   [3, "pedicura", "Pedicura", "Manicura y pedicura", "Tratamiento completo de pies.", 50, 2200, 0],
+  [4, "pedicura-semipermanente", "Pedicura semipermanente", "Manicura y pedicura", "Pedicura con esmaltado semipermanente.", 60, 2800, 0],
   [5, "lifting-pestanas", "Lifting de pestañas", "Mirada", "Curvatura y definición natural de tus pestañas.", 60, 3500, 0],
+  [6, "tinte-cejas", "Tinte de cejas", "Mirada", null, 20, 800, 0],
   [7, "microblading", "Microblading de cejas", "Mirada", "Incluye diseño personalizado.", 120, 25000, 5000],
   [8, "hilo-cejas", "Cejas con hilo", "Depilación", null, 15, 600, 0],
-].map(([id, slug, name, category, description, durationMin, priceCents, depositCents]) => ({ id, slug, name, category, description, durationMin, priceCents, depositCents }));
+].map(([id, slug, name, category, description, durationMin, priceCents, depositCents]) => ({
+  id, slug, name, category, description, durationMin, priceCents, depositCents,
+  depositAlways: depositCents > 0,
+  rebookWeeks: { "manicura-semipermanente": 3, "pedicura-semipermanente": 4, "lifting-pestanas": 6 }[slug] ?? null,
+  consentKind: slug === "microblading" ? "microblading" : null,
+}));
+const ADDONS = [
+  { id: 1, slug: "retirada-semipermanente", name: "Retirada de semipermanente", description: "Si llevas esmalte semipermanente.", durationMin: 15, priceCents: 500, category: "Manicura y pedicura", i18n: {} },
+  { id: 2, slug: "nail-art-sencillo", name: "Nail art sencillo", description: null, durationMin: 15, priceCents: 500, category: "Manicura y pedicura", i18n: {} },
+];
+const PACKS = [
+  { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, i18n: {} },
+  { id: 2, slug: "express", name: "Express", emoji: "⚡", description: "Lo básico en una visita corta.", serviceSlugs: ["manicura-clasica", "hilo-cejas"], discountPercent: 0, i18n: {} },
+];
 
 const TRENDS = [
   { id: 1, emoji: "🍷", title: "Burdeos con brillo glow", body: "Los tonos borgoña mandan este otoño.", topic: "nails", serviceSlug: "manicura-semipermanente" },
@@ -115,7 +130,7 @@ async function check(page, label, vp, errors, shot) {
   for (const vp of VPS) {
     // ===================== reserva web =====================
     {
-      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS };
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };
       const { ctx, page, errors } = await setup(browser, vp, "booking", props);
       await page.waitForSelector(".pick");
       await check(page, "web 1 · servicios", vp, errors, "web-1-servicios");
@@ -145,15 +160,131 @@ async function check(page, label, vp, errors, shot) {
       await check(page, "web 4 · datos", vp, errors, "web-4-datos");
       await page.click("form.form button[type=submit]");
       await page.waitForSelector(".done");
+      await page.waitForSelector(".rebook__opt", { timeout: 5000 }).catch(() => {});
+      const rb = await page.locator(".rebook__opt").count();
+      log("web 5b · tras reservar se ofrece reservar ya el retoque", vp.name, rb >= 1 ? [] : ["no aparece la tarjeta de retoque"]);
       await check(page, "web 5 · confirmación", vp, errors, "web-5-confirmacion");
+      if (rb) {
+        await page.locator(".rebook__opt").first().click();
+        const okRebook = await page.waitForSelector(".rebook--ok", { timeout: 5000 }).then(() => true).catch(() => false);
+        log("web 5c · el retoque se reserva con un toque", vp.name, okRebook ? [] : ["no se confirma: " + (await page.locator(".rebook").first().innerText()).replace(/\s+/g, " ").slice(0, 160)]);
+      }
       await page.click("text=Reservar otra cita");
       await page.waitForSelector(".pick");
-      log("web 6 · 'Reservar otra cita' vuelve al menú", vp.name, []);
+      const rep = await page.locator(".repeat").count();
+      log("web 6 · 'Reservar otra cita' vuelve al menú y ofrece repetir lo de la última vez", vp.name, rep === 1 ? [] : [`.repeat: ${rep}`]);
       await ctx.close();
     }
+    // ===================== reserva completa: packs, sugerencias, extras, acompañante, atajos y casillas =====================
+    {
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };
+      const { ctx, page, errors } = await setup(browser, vp, "booking", props);
+      const sent = { holds: [], book: null };
+      page.on("request", (r) => {
+        if (r.method() !== "POST") return;
+        if (r.url().endsWith("/api/holds")) sent.holds.push(JSON.parse(r.postData() || "{}"));
+        if (r.url().endsWith("/api/bookings")) sent.book = JSON.parse(r.postData() || "{}");
+      });
+      await page.waitForSelector(".pack");
+      await check(page, "completa 1 · packs listos en el primer paso", vp, errors, "full-1-packs");
+      await page.click(".pack >> nth=0"); // «Manos y pies» (-10 %)
+      await page.waitForSelector(".visit__pack");
+      const packLine = await page.locator(".visit__pack").innerText();
+      log("completa 2 · al elegir el pack se aplica el descuento (ahorra 4,60 €)", vp.name, /Manos y pies/.test(packLine) && /4,60/.test(packLine) ? [] : [packLine]);
+      // quitar un servicio rompe el pack y lo avisa
+      await page.locator(".visit__list button").first().click();
+      await page.waitForTimeout(250);
+      const warn = await page.locator(".notice").first().innerText();
+      log("completa 3 · quitar un servicio avisa de que ya no es el pack", vp.name, /pack/i.test(warn) ? [] : [warn]);
+      // se sugiere completar el pack y al aceptar vuelve
+      const sg = await page.locator(".sugg__chip").count();
+      log("completa 4 · se sugiere completar el pack", vp.name, sg >= 1 ? [] : ["no hay sugerencias"]);
+      await page.locator(".sugg__chip").first().click();
+      await page.waitForSelector(".visit__pack");
+      log("completa 5 · al aceptar la sugerencia vuelve el pack", vp.name, []);
+      // extras: suman tiempo y precio
+      const before = await page.locator(".visit__title").innerText();
+      await page.locator(".extras__row .extra").first().click();
+      await page.waitForTimeout(250);
+      const after = await page.locator(".visit__title").innerText();
+      log("completa 6 · un extra suma tiempo y precio", vp.name, before !== after ? [] : ["el total no cambia"]);
+      // acompañante: sus servicios van seguidos
+      await page.click(".comp__open");
+      await page.fill(".comp__form input", "Ana");
+      await page.locator(".comp__list .extra").nth(2).click();
+      await page.click(".comp__form .btn");
+      await page.waitForSelector(".comp__sum");
+      const items = await page.locator(".visit__list li").count();
+      const seg = await page.locator(".seg").count();
+      log("completa 7 · el acompañante añade sus servicios al mismo bloque", vp.name, items === 3 && seg === 0 ? [] : [`líneas: ${items}, selector: ${seg}`]);
+      // atajos
+      await page.waitForSelector(".quick__chip", { timeout: 5000 });
+      await check(page, "completa 8 · atajos, extras y acompañante", vp, errors, "full-3-visita");
+      const chip = page.locator(".quick__chip").first();
+      await chip.evaluate((e) => e.scrollIntoView({ block: "center" }));
+      await chip.click();
+      await page.waitForSelector(".holdbar");
+      log("completa 9 · un atajo bloquea el hueco en un toque", vp.name, []);
+      const lastHold = sent.holds[sent.holds.length - 1] ?? {};
+      log("completa 10 · el bloqueo lleva los extras elegidos", vp.name, Array.isArray(lastHold.addonIds) && lastHold.addonIds.length === 1 ? [] : [JSON.stringify(lastHold)]);
+      await page.click(".holdbar .btn");
+      await page.waitForSelector("form.form");
+      await page.fill("input[autocomplete=name]", "María García López");
+      await page.fill("input[type=tel]", "600123456");
+      await page.check("input[type=checkbox]");
+      await page.click("form.form button[type=submit]");
+      await page.waitForSelector(".done");
+      log("completa 11 · el comentario para el salón lleva al acompañante", vp.name, /Ana/.test(sent.book?.notes ?? "") ? [] : [sent.book?.notes ?? "(vacío)"]);
+      await ctx.close();
+    }
+    // ===================== casillas de seguridad (microblading) =====================
+    {
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es", depositPolicy: "repeat" };
+      const { ctx, page, errors } = await setup(browser, vp, "booking", props);
+      let body = null;
+      page.on("request", (r) => { if (r.method() === "POST" && r.url().endsWith("/api/bookings")) body = JSON.parse(r.postData() || "{}"); });
+      await page.waitForSelector(".pick");
+      await page.locator(".pick", { hasText: "Microblading" }).first().click();
+      await page.waitForSelector(".cal__day.is-free");
+      const slot = page.locator(".slot:not(.slot--taken)").first();
+      await slot.evaluate((e) => e.scrollIntoView({ block: "center" }));
+      await slot.click();
+      await page.waitForSelector(".holdbar");
+      await page.click(".holdbar .btn");
+      await page.waitForSelector("form.form");
+      await page.fill("input[autocomplete=name]", "María García López");
+      await page.fill("input[type=tel]", "600123456");
+      await page.check("input[type=checkbox] >> nth=-1");
+      const off = await page.locator("form.form button[type=submit]").isDisabled();
+      log("casillas 1 · sin marcar las casillas de seguridad no se puede confirmar", vp.name, off ? [] : ["el botón está activo"]);
+      await check(page, "casillas 2 · casillas de seguridad y nota de señal", vp, errors, "full-4-casillas");
+      for (const cb of await page.locator(".safety input[type=checkbox]").all()) await cb.check();
+      const on = await page.locator("form.form button[type=submit]").isEnabled();
+      log("casillas 3 · con todas marcadas se puede confirmar", vp.name, on ? [] : ["sigue desactivado"]);
+      await page.click("form.form button[type=submit]");
+      await page.waitForSelector(".done");
+      log("casillas 4 · se envían las casillas marcadas, no datos de salud", vp.name, JSON.stringify(body?.acks) === '["microblading"]' ? [] : [JSON.stringify(body?.acks)]);
+      await ctx.close();
+    }
+    // ===================== idiomas: gallego e inglés =====================
+    for (const [lang, heading] of [["en", "What can we do for you?"], ["gl", "Que che facemos?"]]) {
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang };
+      const { ctx, page, errors } = await setup(browser, vp, "booking", props);
+      await page.waitForSelector(".pick");
+      const h = await page.locator(".panel__title").first().innerText();
+      log(`idioma ${lang} · el primer paso está traducido`, vp.name, h.trim() === heading ? [] : [h]);
+      await page.locator(".pick").first().click();
+      await page.waitForSelector(".cal__day.is-free");
+      const body = await page.locator("body").innerText();
+      const spanish = ["Elige tu hueco", "Añadir otro servicio", "Cargando huecos", "Mañana", "Quitar"].filter((x) => body.includes(x));
+      log(`idioma ${lang} · el paso de fecha y hora no deja textos en castellano`, vp.name, spanish.length ? [spanish.join(", ")] : []);
+      await check(page, `idioma ${lang} · fecha y hora`, vp, errors, `full-lang-${lang}`);
+      await ctx.close();
+    }
+
     // ===================== visita con cada servicio a su hora =====================
     {
-      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS };
+      const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };
       const { ctx, page, errors } = await setup(browser, vp, "booking", props);
       await page.waitForSelector(".pick");
       await page.click(".pick >> nth=0");
@@ -261,7 +392,7 @@ async function check(page, label, vp, errors, shot) {
   // ===================== reserva en escritorio: lateral con «Tu cita» y la chica del avatar =====================
   {
     const vp = { name: "desktop-1280", width: 1280, height: 900, desktop: true };
-    const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS };
+    const props = { services: SERVICES, staff: [{ id: 1, name: "Pro Diva" }], today: TODAY, maxDate: MAX, whatsapp: "34670424348", address: "Rúa Rambla San Pablo, 6, 15800 Melide, A Coruña", depositEnabled: true, refundHours: 24, trends: TRENDS, addons: ADDONS, packs: PACKS, lang: "es" };
     const { ctx, page, errors } = await setup(browser, vp, "booking", props);
     await page.waitForSelector(".pick");
     await page.click(".pick >> nth=0");
@@ -294,6 +425,11 @@ async function check(page, label, vp, errors, shot) {
     await page.waitForTimeout(900);
     const price = await page.locator(".avatar__bubble").innerText();
     log("Diva · contesta a una pregunta escrita (precio)", vp.name, /35 €|€/.test(price) ? [] : [`dijo: ${price.slice(0, 60)}`]);
+    await page.fill("#diva-q", "¿tenéis packs?");
+    await page.press("#diva-q", "Enter");
+    await page.waitForTimeout(900);
+    const packsSaid = await page.locator(".avatar__bubble").innerText();
+    log("Diva · conoce los packs", vp.name, /Manos y pies/.test(packsSaid) ? [] : [`dijo: ${packsSaid.slice(0, 70)}`]);
     await check(page, "escritorio · Diva conversando", vp, errors, "diva-chat");
     await ctx.close();
   }

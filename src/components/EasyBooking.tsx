@@ -6,7 +6,8 @@ import { addDays } from "@/lib/dates";
 import { fmtDayLabel, fmtDuration, fmtLong, fmtPrice } from "@/lib/format";
 import type { Service } from "./BookingFlow";
 import { icsHref } from "@/lib/ics";
-import { saveBooking } from "@/lib/myBookings";
+import { saveBooking, saveVisitHistory } from "@/lib/myBookings";
+import { getDict } from "@/lib/i18n";
 import MyBookings from "./MyBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
 import CallbackForm from "./CallbackForm";
@@ -43,6 +44,7 @@ export default function EasyBooking({
   initialSlug,
   initialDay,
   depositEnabled = false,
+  depositPolicy = "service",
   refundHours = 24,
 }: {
   services: Service[];
@@ -52,6 +54,7 @@ export default function EasyBooking({
   initialSlug?: string;
   initialDay?: string;
   depositEnabled?: boolean;
+  depositPolicy?: "service" | "repeat";
   refundHours?: number;
 }) {
   // Enlaces de "se ha liberado un hueco": entran directos al servicio (y al día) elegidos
@@ -68,6 +71,11 @@ export default function EasyBooking({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "" });
+  const [acks, setAcks] = useState<Record<string, boolean>>({});
+  // Señal: «según el servicio» o solo a quien ya ha faltado (entonces solo cuentan los servicios marcados «siempre»)
+  const knownDeposit = service ? (depositPolicy === "repeat" ? (service.depositAlways ? service.depositCents ?? 0 : 0) : service.depositCents ?? 0) : 0;
+  const safetyKind = service?.consentKind === "laser" || service?.consentKind === "microblading" ? service.consentKind : null;
+  const allAcked = !safetyKind || [1, 2, 3].every((i) => acks[`${safetyKind}:${i}`]);
   const [done, setDone] = useState<Done | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [xl, setXl] = useState(false);
@@ -212,7 +220,7 @@ export default function EasyBooking({
       const r = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ holdId: hold.holdId, holdToken: hold.holdToken, name: form.name, phone: form.phone }),
+        body: JSON.stringify({ holdId: hold.holdId, holdToken: hold.holdToken, name: form.name, phone: form.phone, ...(safetyKind ? { acks: [safetyKind] } : {}) }),
       });
       const j = await r.json();
       if (!r.ok) {
@@ -237,6 +245,7 @@ export default function EasyBooking({
       setStep("done");
       try {
         saveBooking(b.code, b.token);
+        saveVisitHistory({ startsAt: b.startsAt, slugs: service ? [service.slug] : [] });
         localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, slug: service?.slug ?? "", serviceName: b.serviceName }));
       } catch {
         /* nada */
@@ -447,13 +456,26 @@ export default function EasyBooking({
               <span>Tu teléfono (te avisaremos por mensaje)</span>
               <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="600 123 456" />
             </label>
-            {depositEnabled && (service.depositCents ?? 0) > 0 && (
+            {safetyKind && (
+              <fieldset className="safety easy__safety">
+                <legend>{getDict("es").safetyTitle}</legend>
+                {[1, 2, 3].map((i) => (
+                  <label key={i} className="check">
+                    <input type="checkbox" required checked={!!acks[`${safetyKind}:${i}`]} onChange={(e) => setAcks({ ...acks, [`${safetyKind}:${i}`]: e.target.checked })} />
+                    <span>{getDict("es")[`${safetyKind}${i}` as "laser1"]}</span>
+                  </label>
+                ))}
+                <p className="muted small">{allAcked ? getDict("es").safetyNote : getDict("es").safetyNeed}</p>
+              </fieldset>
+            )}
+            {depositEnabled && knownDeposit > 0 && (
               <p className="notice notice--info easy__notice">
-                Este servicio lleva una <b>señal de {fmtPrice(service.depositCents ?? 0)}</b> que se descuenta del total. Si cancelas con {refundHours} horas o más te la devolvemos. La pagas con tarjeta en el siguiente paso.
+                Este servicio lleva una <b>señal de {fmtPrice(knownDeposit)}</b> que se descuenta del total. Si cancelas con {refundHours} horas o más te la devolvemos. La pagas con tarjeta en el siguiente paso.
               </p>
             )}
-            <button type="submit" className="easy__btn easy__btn--main" disabled={busy}>
-              {busy ? "Un momento…" : depositEnabled && (service.depositCents ?? 0) > 0 ? `Pagar señal de ${fmtPrice(service.depositCents ?? 0)}` : "Confirmar mi cita"}
+            {depositEnabled && depositPolicy === "repeat" && <p className="notice notice--info easy__notice">{getDict("es").depositPolicyNote}</p>}
+            <button type="submit" className="easy__btn easy__btn--main" disabled={busy || !allAcked}>
+              {busy ? "Un momento…" : depositEnabled && knownDeposit > 0 ? `Pagar señal de ${fmtPrice(knownDeposit)}` : "Confirmar mi cita"}
             </button>
             <p className="easy__legal">Al confirmar, Pro Diva usará tus datos para gestionar tu cita y enviarte la confirmación y un recordatorio por WhatsApp o SMS.</p>
           </form>

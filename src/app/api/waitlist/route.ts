@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 const Body = z.object({
   serviceId: z.number().int().positive().optional(),
-  serviceIds: z.array(z.number().int().positive()).min(1).max(4).optional(),
+  serviceIds: z.array(z.number().int().positive()).min(1).max(6).optional(),
   day: z.string().refine(isDay).nullable().optional(),
   part: z.enum(["ANY", "MORNING", "AFTERNOON"]).default("ANY"),
   name: z.string().trim().min(2, "Escribe tu nombre").max(80),

@@ -5,8 +5,9 @@ import { addDays, todayIn } from "./dates";
 import { query, tx, type Runner } from "./db";
 import { BookingError, type ErrCode } from "./errors";
 import { createCheckoutSession, settleDeposit, stripeEnabled } from "./payments";
+import { effectiveDeposit, getDepositPolicy } from "./deposit";
 import { phoneDigits, samePhone } from "./site";
-import { loadVisit } from "./visit";
+import { loadVisit, type Visit } from "./visit";
 
 export { BookingError };
 export type { ErrCode };
@@ -111,7 +112,7 @@ const SUMMARY_SELECT = `
          b.deposit_cents, b.deposit_status, b.attendance,
          COALESCE((SELECT string_agg(bs.name, ' + ' ORDER BY bs.position) FROM booking_services bs WHERE bs.booking_id = b.id), s.name) AS service_name,
          COALESCE((SELECT SUM(bs.price_cents)::int FROM booking_services bs WHERE bs.booking_id = b.id), s.price_cents) AS price_cents,
-         COALESCE((SELECT array_agg(bs.service_id ORDER BY bs.position) FROM booking_services bs WHERE bs.booking_id = b.id), ARRAY[b.service_id]) AS service_ids,
+         COALESCE((SELECT array_agg(bs.service_id ORDER BY bs.position) FILTER (WHERE bs.service_id IS NOT NULL) FROM booking_services bs WHERE bs.booking_id = b.id), ARRAY[b.service_id]) AS service_ids,
          st.name AS staff_name,
          (b.starts_at - now()) >= make_interval(hours => ${CONFIG.cancelNoticeHours}) AS can_cancel
   FROM bookings b
@@ -178,6 +179,55 @@ export async function listCustomerBookings(customerIds: number[], opts: { limit?
     [customerIds, opts.limit ?? 40],
   );
   return rows.map(mapSummary);
+}
+
+/** El pack solo se aplica si los servicios elegidos son EXACTAMENTE los del pack (los extras no cuentan). */
+async function matchPackage(q: Runner, visit: Visit, slug: string | null): Promise<{ slug: string; percent: number } | null> {
+  if (!slug) return null;
+  const r = (await q(`SELECT slug, discount_percent, service_slugs FROM packages WHERE slug = $1 AND active`, [slug])) as unknown as {
+    slug: string;
+    discount_percent: number;
+    service_slugs: string[];
+  }[];
+  if (!r[0]) return null;
+  const want = new Set(r[0].service_slugs);
+  const have = new Set(visit.items.map((i) => i.slug));
+  if (visit.items.length !== want.size || want.size !== have.size || [...want].some((x) => !have.has(x))) return null; // sin servicios repetidos
+  return { slug: r[0].slug, percent: r[0].discount_percent };
+}
+
+/** Duración, limpieza y paso de huecos de una cita ya creada (incluye los extras en la duración). */
+export async function bookingVisitMetrics(q: Runner, bookingId: string, fallbackMin = 30): Promise<{ duration: number; buffer: number; step: number }> {
+  const svc = (await q(
+    `SELECT bs.duration_min, bs.buffer_min, bs.is_addon, COALESCE(s.slot_step_min, bs.duration_min) AS step_min
+     FROM booking_services bs LEFT JOIN services s ON s.id = bs.service_id
+     WHERE bs.booking_id = $1::uuid ORDER BY bs.position`,
+    [bookingId],
+  )) as unknown as { duration_min: number; buffer_min: number; is_addon: boolean; step_min: number }[];
+  const base = svc.filter((x) => !x.is_addon);
+  const duration = svc.reduce((a, x) => a + x.duration_min, 0) || fallbackMin;
+  return {
+    duration,
+    buffer: base.length ? base[base.length - 1].buffer_min : 0,
+    step: Math.max(5, base.length ? Math.min(...base.map((x) => x.step_min)) : duration),
+  };
+}
+
+/** Casillas de seguridad que pide cada cita según sus servicios (láser, microblading…). */
+async function requiredConsents(q: Runner, bookingId: string): Promise<string[]> {
+  const r = (await q(
+    `SELECT DISTINCT s.consent_kind AS k FROM booking_services bs JOIN services s ON s.id = bs.service_id
+     WHERE bs.booking_id = $1::uuid AND s.consent_kind IS NOT NULL`,
+    [bookingId],
+  )) as unknown as { k: string }[];
+  return r.map((x) => x.k);
+}
+async function assertAndStoreConsents(q: Runner, bookingId: string, acks: string[]): Promise<void> {
+  const need = await requiredConsents(q, bookingId);
+  if (!need.length) return;
+  const missing = need.filter((k) => !acks.includes(k));
+  if (missing.length) throw new BookingError("INVALID", "Falta marcar las casillas de seguridad del tratamiento.", 400);
+  await q(`UPDATE bookings SET consent_acks = $2::text[], consent_at = now() WHERE id = $1::uuid`, [bookingId, need]);
 }
 
 /** Vincula la cita con la ficha de la clienta (se crea si es nueva). Devuelve cuántos plantones lleva. */
@@ -269,6 +319,9 @@ export async function createHold(input: {
   replace?: { holdId: string; holdToken: string };
   /** Visita en horas distintas: al bloquear otra hora, los bloqueos hermanos se alargan para que caduquen a la vez. */
   extend?: { holdId: string; holdToken: string }[];
+  /** Extras (retirada de esmalte, nail art…) y pack elegido (el servidor comprueba y aplica el descuento). */
+  addonIds?: number[];
+  packageSlug?: string | null;
 }): Promise<HoldResult> {
   return tx(async (q) => {
     // Limpieza perezosa de bloqueos caducados
@@ -283,7 +336,7 @@ export async function createHold(input: {
       ]);
     }
 
-    const visit = await loadVisit(input.serviceIds, q);
+    const visit = await loadVisit(input.serviceIds, q, input.addonIds ?? []);
 
     // Bloqueos hermanos (visita en horas distintas): se alargan y no cuentan para el tope por IP
     const kept: string[] = [];
@@ -327,14 +380,23 @@ export async function createHold(input: {
     if (!free.length) throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de ocuparse. Elige otro.", 409);
     const staffId = free[0].staffId;
 
+    // Señal: con la política «solo a quien ya ha faltado», al reservar solo cuentan los servicios marcados «siempre»;
+    // el resto se decide al confirmar, cuando ya se sabe quién es la clienta.
+    const policy = await getDepositPolicy(q);
+    const holdDeposit = policy.mode === "repeat" ? visit.items.filter((i) => i.depositAlways).reduce((a, i) => a + i.depositCents, 0) : visit.depositCents;
+    // Pack: descuento (en %) sobre los servicios; los extras no se rebajan
+    const pack = await matchPackage(q, visit, input.packageSlug ?? null);
+    const svcPrice = (priceCents: number) => (pack ? Math.round((priceCents * (100 - pack.percent)) / 100) : priceCents);
+    const totalPrice = visit.items.reduce((a, i) => a + svcPrice(i.priceCents), 0) + visit.addons.reduce((a, x) => a + x.priceCents, 0);
+
     const holdToken = newToken();
     try {
       const ins = (await q(
-        `INSERT INTO bookings (staff_id, service_id, starts_at, ends_at, blocked_until, status, hold_expires_at, hold_token, ip_hash, deposit_cents)
+        `INSERT INTO bookings (staff_id, service_id, starts_at, ends_at, blocked_until, status, hold_expires_at, hold_token, ip_hash, deposit_cents, package_slug)
          VALUES ($1::int, $2::int, $3::timestamptz, $3::timestamptz + make_interval(mins => $4::int),
-                 $3::timestamptz + make_interval(mins => $5::int), 'HOLD', now() + make_interval(mins => $6::int), $7, $8, $9::int)
+                 $3::timestamptz + make_interval(mins => $5::int), 'HOLD', now() + make_interval(mins => $6::int), $7, $8, $9::int, $10)
          RETURNING id, EXTRACT(EPOCH FROM (hold_expires_at - now()))::int AS ttl`,
-        [staffId, visit.items[0].id, input.startsAt, visit.durationMin, visit.durationMin + visit.bufferMin, CONFIG.holdMinutes, holdToken, input.ipHash, visit.depositCents],
+        [staffId, visit.items[0].id, input.startsAt, visit.durationMin, visit.durationMin + visit.bufferMin, CONFIG.holdMinutes, holdToken, input.ipHash, holdDeposit, pack?.slug ?? null],
       )) as unknown as { id: string; ttl: number }[];
 
       for (let i = 0; i < visit.items.length; i++) {
@@ -342,7 +404,15 @@ export async function createHold(input: {
         await q(
           `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min)
            VALUES ($1::uuid, $2::int, $3::int, $4, $5::int, $6::int, $7::int, $8::int)`,
-          [ins[0].id, it.id, i, it.name, it.durationMin, it.priceCents, it.depositCents, it.bufferMin],
+          [ins[0].id, it.id, i, it.name, it.durationMin, svcPrice(it.priceCents), it.depositCents, it.bufferMin],
+        );
+      }
+      for (let i = 0; i < visit.addons.length; i++) {
+        const ad = visit.addons[i];
+        await q(
+          `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min, is_addon)
+           VALUES ($1::uuid, NULL, $2::int, $3, $4::int, $5::int, 0, 0, true)`,
+          [ins[0].id, visit.items.length + i, ad.name, ad.durationMin, ad.priceCents],
         );
       }
 
@@ -353,9 +423,9 @@ export async function createHold(input: {
         expiresInSec: ins[0].ttl,
         staffId,
         staffName: st[0]?.name ?? "",
-        priceCents: visit.priceCents,
+        priceCents: totalPrice,
         durationMin: visit.durationMin,
-        depositCents: visit.depositCents,
+        depositCents: holdDeposit,
         blockedMin: visit.durationMin + visit.bufferMin,
         endsAt: new Date(new Date(input.startsAt).getTime() + visit.durationMin * 60000).toISOString(),
         extendedIds: kept,
@@ -386,6 +456,7 @@ export async function confirmBooking(input: {
   phone: string;
   email?: string | null;
   notes?: string | null;
+  acks?: string[];
 }): Promise<{ booking: BookingSummary; checkoutUrl?: string; noShowCount: number }> {
   const out = await tx(async (q) => {
     const found = (await q(
@@ -397,9 +468,14 @@ export async function confirmBooking(input: {
     if (!row) throw new BookingError("NOT_FOUND", "No encontramos tu reserva. Vuelve a elegir hueco.", 404);
     if (row.status === "CANCELLED") throw new BookingError("HOLD_EXPIRED", "Esta reserva fue cancelada.", 410);
     if (!row.future) throw new BookingError("HOLD_EXPIRED", "Ese horario ya ha pasado.", 410);
-    if (row.status !== "CONFIRMED") await assertCustomerFree(q, input.phone, [{ start: row.starts_at, end: row.ends_at }], [input.holdId], 1);
+    let depositCents = row.deposit_cents;
+    if (row.status !== "CONFIRMED") {
+      await assertCustomerFree(q, input.phone, [{ start: row.starts_at, end: row.ends_at }], [input.holdId], 1);
+      await assertAndStoreConsents(q, input.holdId, input.acks ?? []);
+      depositCents = await effectiveDeposit(q, input.holdId, input.phone, row.deposit_cents, stripeEnabled());
+    }
 
-    const needsPayment = row.status !== "CONFIRMED" && row.deposit_cents > 0 && stripeEnabled();
+    const needsPayment = row.status !== "CONFIRMED" && depositCents > 0 && stripeEnabled();
     let noShowCount = 0;
 
     if (needsPayment) {
@@ -478,6 +554,7 @@ export async function confirmGroup(input: {
   phone: string;
   email?: string | null;
   notes?: string | null;
+  acks?: string[];
 }): Promise<{ bookings: BookingSummary[]; checkoutUrl?: string; noShowCount: number; fresh: boolean }> {
   const ids = input.legs.map((l) => l.holdId);
   if (input.legs.length < 2 || input.legs.length > 4) throw new BookingError("INVALID", "Una visita en horas distintas lleva de 2 a 4 citas.", 400);
@@ -513,7 +590,11 @@ export async function confirmGroup(input: {
     }
     await assertCustomerFree(q, input.phone, rows.map((r) => ({ start: r.starts_at, end: r.ends_at })), ids, rows.length);
 
-    const totalDeposit = rows.reduce((a, r) => a + r.deposit_cents, 0);
+    let totalDeposit = 0;
+    for (const r of rows) {
+      await assertAndStoreConsents(q, r.id, input.acks ?? []);
+      totalDeposit += await effectiveDeposit(q, r.id, input.phone, r.deposit_cents, stripeEnabled());
+    }
     const needsPayment = totalDeposit > 0 && stripeEnabled();
     let noShowCount = 0;
     try {
@@ -665,16 +746,8 @@ export async function rescheduleBooking(input: {
       throw new BookingError("TOO_LATE", `Con menos de ${RESCHEDULE_HOURS} horas de antelación no se puede cambiar online. Llámanos al ${CONFIG.salon.phoneMobile}.`, 409);
     }
 
-    // Duración y limpieza salen de la foto de servicios de la cita
-    const svc = (await q(
-      `SELECT bs.duration_min, bs.buffer_min, COALESCE(s.slot_step_min, bs.duration_min) AS step_min
-       FROM booking_services bs LEFT JOIN services s ON s.id = bs.service_id
-       WHERE bs.booking_id = $1::uuid ORDER BY bs.position`,
-      [row.id],
-    )) as unknown as { duration_min: number; buffer_min: number; step_min: number }[];
-    const duration = svc.reduce((a, x) => a + x.duration_min, 0) || Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000);
-    const buffer = svc.length ? svc[svc.length - 1].buffer_min : 0;
-    const step = Math.max(5, svc.length ? Math.min(...svc.map((x) => x.step_min)) : duration);
+    // Duración, limpieza y paso salen de la foto de servicios de la cita (los extras suman duración)
+    const { duration, buffer, step } = await bookingVisitMetrics(q, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
 
     const target = new Date(input.startsAt).getTime();
     if (!(target > Date.now())) throw new BookingError("INVALID", "Elige un momento futuro.", 400);

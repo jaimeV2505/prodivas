@@ -4,6 +4,7 @@ exports.ArrowLeft = Icon;
 exports.ArrowRight = Icon;
 exports.ArrowUpRight = Icon;
 exports.Bell = Icon;
+exports.CalendarCheck = Icon;
 exports.CalendarPlus = Icon;
 exports.Check = Icon;
 exports.ChevronLeft = Icon;

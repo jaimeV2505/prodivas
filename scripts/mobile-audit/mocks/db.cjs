@@ -21,7 +21,12 @@ const SERVICES = [
   ["laser-mediana", "Láser · zona mediana", "Depilación", "Medias piernas, brazos...", 30, 4500, 0],
   ["laser-piernas", "Láser · piernas completas", "Depilación", null, 60, 8000, 3000],
 ].map((r, i) => ({ id: i + 1, slug: r[0], name: r[1], category: r[2], description: r[3], durationMin: r[4], priceCents: r[5], depositCents: r[6] }));
-const SERVICES_FULL = SERVICES.map((s, i) => ({ id: s.id, slug: s.slug, name: s.name, category: s.category, duration_min: s.durationMin, price_cents: s.priceCents, slot_step_min: null, buffer_min: i === 0 ? 10 : 0, deposit_cents: s.depositCents, active: true, sort: (i + 1) * 10 }));
+for (const s of SERVICES) {
+  s.depositAlways = s.depositCents > 0;
+  s.rebookWeeks = { "manicura-semipermanente": 3, "pedicura-semipermanente": 4, "lifting-pestanas": 6 }[s.slug] ?? null;
+  s.consentKind = s.slug.startsWith("laser-") ? "laser" : s.slug === "microblading" ? "microblading" : null;
+}
+const SERVICES_FULL = SERVICES.map((s, i) => ({ rebook_weeks: s.rebookWeeks, consent_kind: s.consentKind, deposit_always: s.depositAlways, id: s.id, slug: s.slug, name: s.name, category: s.category, duration_min: s.durationMin, price_cents: s.priceCents, slot_step_min: null, buffer_min: i === 0 ? 10 : 0, deposit_cents: s.depositCents, active: true, sort: (i + 1) * 10 }));
 
 const HOURS_RAW = [0, 1, 2, 3, 4, 5, 6].map((w) => w === 0 ? { weekday: 0, closed: true, o: null, c: null, bs: null, be: null } : w === 6 ? { weekday: 6, closed: false, o: "10:00", c: "14:00", bs: null, be: null } : { weekday: w, closed: false, o: "10:00", c: "20:00", bs: "14:00", be: "16:00" });
 const HOURS_TEXT = HOURS_RAW.map((h) => ({ weekday: h.weekday, closed: h.closed, open_time: h.o && h.o + ":00", close_time: h.c && h.c + ":00", break_start: h.bs && h.bs + ":00", break_end: h.be && h.be + ":00" }));
@@ -55,7 +60,7 @@ const WEEK_BK = [
 function route(sql) {
   const s = sql.replace(/\s+/g, " ");
   const V = globalThis.__VARIANT__ || {};
-  if (/AS "durationMin"/.test(s)) return SERVICES;
+  if (/AS "durationMin"/.test(s) && /FROM services/.test(s)) return SERVICES;
   if (/FROM business_hours ORDER BY weekday/.test(s) && /open_time::text/.test(s)) return HOURS_TEXT;
   if (/SELECT id, name FROM staff WHERE active ORDER BY sort, id/.test(s)) return V.staff2 ? [{ id: 1, name: "Pro Diva" }, { id: 2, name: "Marta" }] : [{ id: 1, name: "Pro Diva" }];
   // resumen de cita
@@ -92,6 +97,13 @@ function route(sql) {
   if (/SELECT id, name, active FROM staff ORDER BY active DESC/.test(s)) return [{ id: 1, name: "Pro Diva", active: true }, { id: 2, name: "Marta", active: true }];
   if (/last_cron_run/.test(s)) return [{ mins: 7 }];
   if (/MIN\(duration_min\)/.test(s)) return [{ m: 15 }];
+  if (/FROM addons/.test(s)) return [
+    { id: 1, slug: "retirada-semipermanente", name: "Retirada de semipermanente", description: "Si llevas esmalte semipermanente.", durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 10, category: "Manicura y pedicura", i18n: {} },
+    { id: 2, slug: "nail-art-sencillo", name: "Nail art sencillo", description: null, durationMin: 15, priceCents: 500, duration_min: 15, price_cents: 500, active: true, sort: 20, category: "Manicura y pedicura", i18n: {} }];
+  if (/FROM packages/.test(s)) return [
+    { id: 1, slug: "manos-y-pies", name: "Manos y pies", emoji: "💅", description: "Manicura y pedicura a juego.", serviceSlugs: ["manicura-semipermanente", "pedicura-semipermanente"], discountPercent: 10, discount_percent: 10, service_slugs: ["manicura-semipermanente", "pedicura-semipermanente"], active: true, sort: 10, i18n: {} },
+    { id: 2, slug: "mirada-completa", name: "Mirada completa", emoji: "👁️", description: "Pestañas y cejas.", serviceSlugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], discountPercent: 0, discount_percent: 0, service_slugs: ["lifting-pestanas", "tinte-cejas", "hilo-cejas"], active: true, sort: 20, i18n: {} }];
+  if (/FROM settings WHERE key IN/.test(s)) return [{ key: "deposit_policy", value: "service" }, { key: "deposit_after_no_shows", value: "1" }, { key: "deposit_default_cents", value: "1000" }];
   if (/FROM trends/.test(s)) return [
     { id: 1, emoji: "🍷", title: "Burdeos con brillo glow", body: "Los tonos borgoña y burdeos mandan este otoño.", topic: "nails", serviceSlug: "manicura-semipermanente", service_slug: "manicura-semipermanente", active: true, sort: 10 },
     { id: 2, emoji: "👁️", title: "Lifting de pestañas", body: "Mirada abierta sin extensiones.", topic: "lashes", serviceSlug: "lifting-pestanas", service_slug: "lifting-pestanas", active: true, sort: 70 }];

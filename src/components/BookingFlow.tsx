@@ -4,15 +4,19 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowLeft, CalendarPlus, Check, ChevronLeft, ChevronRight, Clock, Lock, MessageCircle, Sparkles } from "lucide-react";
-import { daysInMonth } from "@/lib/dates";
-import { saveBooking } from "@/lib/myBookings";
-import type { Trend } from "@/lib/trends";
+import { discounted, matchPack, suggest } from "@/lib/combos";
+import { addDays, daysInMonth } from "@/lib/dates";
+import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice, fmtShortDay, localParts, weekdayName, weekInitials } from "@/lib/format";
+import { fill, getDict, LOCALE, localCategory, localized, MONEY_LOCALE, type Dict, type Lang } from "@/lib/i18n";
+import { loadVisitHistory, saveBooking, saveVisitHistory, usualOf, type VisitRecord } from "@/lib/myBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
+import type { Trend } from "@/lib/trends";
 import BookingAvatar, { type AvatarState } from "./BookingAvatar";
 import PetalBurst from "./PetalBurst";
+import RebookCard from "./RebookCard";
 import WaitlistForm from "./WaitlistForm";
-import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice } from "@/lib/format";
 
+type I18nJson = Partial<Record<"gl" | "en", { name?: string; description?: string }>>;
 export type Service = {
   id: number;
   slug: string;
@@ -22,8 +26,15 @@ export type Service = {
   durationMin: number;
   priceCents: number;
   depositCents?: number;
+  depositAlways?: boolean;
+  rebookWeeks?: number | null;
+  consentKind?: string | null;
 };
 export type Staff = { id: number; name: string };
+/** Extra que suma tiempo y precio (retirada de esmalte, nail art…). */
+export type Addon = { id: number; slug: string; name: string; description: string | null; durationMin: number; priceCents: number; category: string | null; i18n?: I18nJson };
+/** Pack: combinación de servicios ya pensada, con descuento opcional. */
+export type Pack = { id: number; slug: string; name: string; emoji: string; description: string | null; serviceSlugs: string[]; discountPercent: number; i18n?: I18nJson };
 type Slot = { day: string; time: string; startsAt: string; available: boolean; staffIds: number[] };
 type Hold = {
   holdId: string;
@@ -46,12 +57,16 @@ type Done = {
   priceCents: number;
 };
 type Step = "service" | "staff" | "time" | "details" | "done";
-/** Visita en horas distintas: una cita por servicio, cada una con su día, su hora y su bloqueo. */
-type Leg = { service: Service; day: string | null; hold: Hold | null };
+/** Visita en horas distintas: una cita por servicio, cada una con su día, su hora, su bloqueo y sus extras. */
+type Leg = { service: Service; day: string | null; hold: Hold | null; addons: number[] };
 
 type Props = {
   services: Service[];
   staff: Staff[];
+  addons?: Addon[];
+  packs?: Pack[];
+  lang?: Lang;
+  depositPolicy?: "service" | "repeat";
   initialSlug?: string;
   initialDay?: string;
   initialTime?: string;
@@ -67,7 +82,9 @@ type Props = {
 };
 
 const EASE_OUT: [number, number, number, number] = [0.23, 1, 0.32, 1];
-const WEEK = ["L", "M", "X", "J", "V", "S", "D"];
+const MAX_SERVICES = 6; // en un solo bloque (con acompañante)
+const MAX_LEGS = 4; // citas separadas
+const SAFETY_KINDS = ["laser", "microblading"] as const;
 
 function icsHref(list: Done[], address: string): string {
   const f = (iso: string) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
@@ -85,15 +102,46 @@ function icsHref(list: Done[], address: string): string {
   return "data:text/calendar;charset=utf-8," + encodeURIComponent(lines.join("\r\n"));
 }
 
-export default function BookingFlow({ services, staff, initialSlug, initialDay, initialTime, initialColor, initialExtras, trends = [], today, maxDate, whatsapp, address, depositEnabled = false, refundHours = 24 }: Props) {
+export default function BookingFlow({
+  services,
+  staff,
+  addons = [],
+  packs = [],
+  lang = "es",
+  depositPolicy = "service",
+  initialSlug,
+  initialDay,
+  initialTime,
+  initialColor,
+  initialExtras,
+  trends = [],
+  today,
+  maxDate,
+  whatsapp,
+  address,
+  depositEnabled = false,
+  refundHours = 24,
+}: Props) {
   const reduce = useReducedMotion();
+  const T = getDict(lang);
+  const locale = LOCALE[lang];
+  const t = (k: keyof Dict, v?: Record<string, string | number>) => fill(T[k], v);
+  const L = (x: { slug?: string; name: string; description?: string | null; i18n?: I18nJson }) => localized(x, lang);
+  const money = (c: number) => fmtPrice(c, MONEY_LOCALE[lang]);
+  const weekInit = useMemo(() => weekInitials(locale), [locale]);
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
+
   const multiStaff = staff.length > 1;
   const stepOrder: Step[] = multiStaff ? ["service", "staff", "time", "details"] : ["service", "time", "details"];
-  const stepLabel: Record<string, string> = {
-    service: "Servicio",
-    staff: "Profesional",
-    time: "Fecha y hora",
-    details: "Tus datos",
+  const stepLabel: Record<string, string> = { service: T.stepService, staff: T.stepStaff, time: T.stepTime, details: T.stepDetails };
+
+  // Mensaje de error en el idioma de la clienta (en castellano se enseña el del servidor, que es más concreto)
+  const errText = (code: string | undefined, fallback: string, serverMsg?: string) => {
+    if (lang === "es" && serverMsg) return serverMsg;
+    const map: Record<string, string> = { SLOT_TAKEN: T.errSlotTaken, HOLD_EXPIRED: T.errHoldExpired, NOT_FOUND: T.errNotFound, CONFLICT: T.errConflict, LIMIT: T.errLimit, INVALID: T.errInvalid };
+    return (code && map[code]) || fallback;
   };
 
   const initialService = services.find((s) => s.slug === initialSlug) ?? null;
@@ -102,6 +150,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const [step, setStep] = useState<Step>(initialService ? (multiStaff && !initialTime ? "staff" : "time") : "service");
   const [month, setMonth] = useState((initialDay && initialDay >= today ? initialDay : today).slice(0, 7));
   const [slots, setSlots] = useState<Slot[] | null>(null);
+  const [soon, setSoon] = useState<Slot[] | null>(null); // próximas 3 semanas, para los atajos
   const [dayT, setDayT] = useState<string | null>(initialDay && initialDay >= today ? initialDay : null);
   const [holdT, setHoldT] = useState<Hold | null>(null);
   const [busySlot, setBusySlot] = useState<string | null>(null);
@@ -115,9 +164,17 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     (initialExtras ?? [])
       .map((slug) => services.find((x) => x.slug === slug))
       .filter((x): x is Service => !!x && x.id !== initialService?.id)
-      .slice(0, 3),
+      .slice(0, MAX_SERVICES - 1),
   );
   const [addOpen, setAddOpen] = useState(false);
+  const [addonsT, setAddonsT] = useState<number[]>([]); // extras de la visita (en un bloque)
+  const [history, setHistory] = useState<VisitRecord[]>([]);
+  const [acks, setAcks] = useState<Record<string, boolean>>({});
+  // Acompañante («venimos 2»): sus servicios van seguidos de los tuyos, en el mismo bloque
+  const [compOpen, setCompOpen] = useState(false);
+  const [compName, setCompName] = useState("");
+  const [compDraft, setCompDraft] = useState<number[]>([]);
+  const [compServices, setCompServices] = useState<Service[]>([]);
 
   // Visita en horas distintas ("apart"): una cita por servicio. Si no, todos seguidos en un solo bloque.
   const [apart, setApart] = useState(false);
@@ -132,22 +189,40 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     else setDayT(d);
   };
 
-  // Servicios de la visita (hasta 4) y los que se consultan ahora al pedir huecos
-  const visitServices = useMemo(() => (apart ? legs.map((l) => l.service) : service ? [service, ...extras] : []), [apart, legs, service, extras]);
+  // Servicios de la visita (hasta 6 en un bloque, 4 en citas separadas) y los que se consultan ahora al pedir huecos
+  const visitServices = useMemo(() => (apart ? legs.map((l) => l.service) : service ? [service, ...extras, ...compServices] : []), [apart, legs, service, extras, compServices]);
   const availServices = apart ? (cur ? [cur.service] : []) : visitServices;
-  const availKey = availServices.map((x) => x.id).join(",");
-  const totalDuration = visitServices.reduce((a, x) => a + x.durationMin, 0);
-  const totalPrice = visitServices.reduce((a, x) => a + x.priceCents, 0);
-  const totalDeposit = visitServices.reduce((a, x) => a + (x.depositCents ?? 0), 0);
-  const needsDeposit = depositEnabled && totalDeposit > 0;
+  const curAddonIds = apart ? cur?.addons ?? [] : addonsT;
+  // clave de lo que se consulta: servicios | extras
+  const availKey = availServices.length ? `${availServices.map((x) => x.id).join(",")}|${curAddonIds.join(",")}` : "";
+  const allAddonIds = apart ? legs.flatMap((l) => l.addons) : addonsT;
+  const addonObjs = allAddonIds.map((id) => addons.find((a) => a.id === id)).filter((a): a is Addon => !!a);
+  const servicesDuration = visitServices.reduce((a, x) => a + x.durationMin, 0);
+  const totalDuration = servicesDuration + addonObjs.reduce((a, x) => a + x.durationMin, 0);
+  // Pack: si los servicios elegidos son exactamente los de un pack, se aplica su descuento (el servidor comprueba lo mismo)
+  const matchedPack = !apart ? matchPack(visitServices.map((s) => s.slug), packs) : null;
+  const servicesPrice = visitServices.reduce((a, x) => a + x.priceCents, 0);
+  const packPrice = matchedPack ? visitServices.reduce((a, x) => a + discounted(x.priceCents, matchedPack.discountPercent), 0) : servicesPrice;
+  const packSaving = servicesPrice - packPrice;
+  const totalPrice = packPrice + addonObjs.reduce((a, x) => a + x.priceCents, 0);
+  // Señal: «según el servicio» como siempre, o solo a quien ya ha faltado (en ese caso solo cuentan los servicios marcados «siempre»)
+  const depositKnown = visitServices.reduce((a, x) => a + (depositPolicy === "repeat" ? (x.depositAlways ? x.depositCents ?? 0 : 0) : x.depositCents ?? 0), 0);
+  const needsDeposit = depositEnabled && depositKnown > 0;
+  const showPolicyNote = depositEnabled && depositPolicy === "repeat";
+  // Casillas de seguridad (láser, microblading)
+  const kinds = SAFETY_KINDS.filter((k) => visitServices.some((s) => s.consentKind === k));
+  const needAcks = kinds.flatMap((k) => [1, 2, 3].map((i) => `${k}:${i}`));
+  const allAcked = needAcks.every((k) => acks[k]);
 
   /* ---------- disponibilidad ---------- */
   const refresh = useCallback(async (h?: Hold | null) => {
     if (!availKey) return;
+    const [ids, ads] = availKey.split("|");
     const own = h === undefined ? holdRef.current : h; // el bloqueo propio no cuenta como "ocupado" para ella
     const from = `${month}-01`;
     const to = `${month}-${String(daysInMonth(month)).padStart(2, "0")}`;
-    const qs = new URLSearchParams({ serviceIds: availKey, from, to });
+    const qs = new URLSearchParams({ serviceIds: ids, from, to });
+    if (ads) qs.set("addonIds", ads);
     if (staffChoice !== null) qs.set("staffId", String(staffChoice));
     if (own) {
       qs.set("holdId", own.holdId);
@@ -159,9 +234,10 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       const j = (await r.json()) as { slots: Slot[] };
       setSlots(j.slots);
     } catch {
-      setNotice((n) => n ?? { tone: "error", text: "No pudimos cargar los huecos. Revisa tu conexión." });
+      setNotice((n) => n ?? { tone: "error", text: T.loadFail });
     }
-  }, [availKey, staffChoice, month]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availKey, staffChoice, month, lang]);
 
   // Carga + sondeo cada 15 s + al volver a la pestaña: los huecos que otra persona
   // bloquea aparecen candados casi en tiempo real.
@@ -177,6 +253,39 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     };
   }, [step, availKey, refresh]);
 
+  // Próximas 3 semanas (para «lo antes posible», «esta tarde» y «como siempre»), cada 30 s
+  const fetchSoon = useCallback(async () => {
+    if (!availKey) return;
+    const [ids, ads] = availKey.split("|");
+    const end = addDays(today, 20);
+    const qs = new URLSearchParams({ serviceIds: ids, from: today, to: end > maxDate ? maxDate : end });
+    if (ads) qs.set("addonIds", ads);
+    if (staffChoice !== null) qs.set("staffId", String(staffChoice));
+    const own = holdRef.current;
+    if (own) {
+      qs.set("holdId", own.holdId);
+      qs.set("holdToken", own.holdToken);
+    }
+    try {
+      const r = await fetch(`/api/availability?${qs}`, { cache: "no-store" });
+      if (r.ok) setSoon(((await r.json()) as { slots: Slot[] }).slots);
+    } catch {
+      /* los atajos son un extra: sin conexión simplemente no salen */
+    }
+  }, [availKey, staffChoice, today, maxDate]);
+  useEffect(() => {
+    if (step !== "time" || !availKey) return;
+    setSoon(null);
+    void fetchSoon();
+    const id = setInterval(() => void fetchSoon(), 30000);
+    return () => clearInterval(id);
+  }, [step, availKey, fetchSoon]);
+
+  // Visitas anteriores guardadas en este móvil
+  useEffect(() => {
+    setHistory(loadVisitHistory());
+  }, []);
+
   // Llegada desde un hueco del hero ("Hoy 17:15"): se bloquea solo y se pasa directo a los datos
   const autoPicked = useRef(false);
   useEffect(() => {
@@ -184,7 +293,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     autoPicked.current = true;
     const target = slots.find((x) => x.day === initialDay && x.time === initialTime);
     if (target?.available) void pickSlot(target, true);
-    else setNotice({ tone: "info", text: "Ese hueco ya no está libre. Elige otro de la lista." });
+    else setNotice({ tone: "info", text: T.slotGone });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slots, service, step]);
 
@@ -257,16 +366,17 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     if (!deadline) return;
     setNow(Date.now());
     const id = setInterval(() => {
-      const t = Date.now();
-      setNow(t);
-      if (t >= deadline) {
+      const nowMs = Date.now();
+      setNow(nowMs);
+      if (nowMs >= deadline) {
         clearAllHolds();
-        setNotice({ tone: "info", text: "Se acabó el tiempo y liberamos tus huecos. Elígelos de nuevo si siguen libres." });
+        setNotice({ tone: "info", text: T.timeUp });
         setStep((s) => (s === "details" ? "time" : s));
         void refresh(null);
       }
     }, 1000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deadline, refresh]);
 
   const remaining = deadline ? Math.max(0, Math.ceil((deadline - now) / 1000)) : 0;
@@ -293,13 +403,15 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
           serviceIds: availServices.map((x) => x.id),
           staffId: staffChoice,
           startsAt: slot.startsAt,
+          ...(curAddonIds.length ? { addonIds: curAddonIds } : {}),
+          ...(matchedPack ? { packageSlug: matchedPack.slug } : {}),
           ...(hold ? { replaceHoldId: hold.holdId, replaceToken: hold.holdToken } : {}),
           ...(siblings.length ? { extend: siblings.map((h) => ({ holdId: h.holdId, holdToken: h.holdToken })) } : {}),
         }),
       });
       const j = await r.json();
       if (!r.ok) {
-        setNotice({ tone: "error", text: j?.error?.message ?? "No pudimos bloquear ese hueco." });
+        setNotice({ tone: "error", text: errText(j?.error?.code, T.couldNotHold, j?.error?.message) });
         await refresh();
       } else {
         const deadlineNew = Date.now() + j.expiresInSec * 1000;
@@ -316,7 +428,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         };
         if (apart) {
           const ext: string[] = j.extendedIds ?? [];
-          const lost = legs.filter((l, i) => i !== legIndex && l.hold && !ext.includes(l.hold.holdId)).map((l) => l.service.name);
+          const lost = legs.filter((l, i) => i !== legIndex && l.hold && !ext.includes(l.hold.holdId)).map((l) => L(l.service).name);
           setLegs((ls) =>
             ls.map((l, i) => {
               if (i === legIndex) return { ...l, hold: next };
@@ -325,7 +437,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
               return { ...l, hold: null }; // ese bloqueo ya había caducado
             }),
           );
-          if (lost.length) setNotice({ tone: "info", text: `La hora de ${lost.join(" y ")} había caducado: elígela otra vez.` });
+          if (lost.length) setNotice({ tone: "info", text: t("lostHold", { names: lost.join(" / ") }) });
           // pasa sola a la siguiente cita que aún no tiene hora
           const nextIdx = legs.findIndex((l, i) => i !== legIndex && (!l.hold || !ext.includes(l.hold.holdId)));
           if (nextIdx >= 0) {
@@ -346,37 +458,54 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         }
       }
     } catch {
-      setNotice({ tone: "error", text: "Sin conexión. Inténtalo de nuevo." });
+      setNotice({ tone: "error", text: T.noConn });
     } finally {
       setBusySlot(null);
     }
   }
 
-  /* ---------- navegación ---------- */
+  /* ---------- navegación y acciones ---------- */
   // En horas distintas, el primer servicio de la lista es siempre `service` (se usa en varios sitios)
   function commitLegs(next: Leg[]) {
     setLegs(next);
     setService(next[0]?.service ?? null);
   }
-  function addExtra(s: Service) {
-    if (visitServices.length >= 4 || visitServices.some((v) => v.id === s.id)) return;
+  const names = (list: Service[]) => list.map((s) => L(s).name).join(" + ");
+  const warnIfPackBreaks = (nextList: Service[]) => {
+    if (matchedPack && !matchPack(nextList.map((s) => s.slug), packs)) setNotice({ tone: "info", text: t("packLost", { name: L(matchedPack).name }) });
+    else setNotice(null);
+  };
+
+  // Añade varios servicios a la visita de golpe (packs, sugerencias, Diva)
+  function addMany(list: Service[]): boolean {
+    const cap = apart ? MAX_LEGS : MAX_SERVICES;
+    const fresh = list.filter((s) => !visitServices.some((v) => v.id === s.id));
+    if (!fresh.length) return false;
+    if (visitServices.length + fresh.length > cap) return false;
     if (apart) {
-      commitLegs([...legs, { service: s, day: null, hold: null }]); // las demás citas conservan su hueco
+      commitLegs([...legs, ...fresh.map((s) => ({ service: s, day: null, hold: null, addons: [] as number[] }))]); // las demás citas conservan su hueco
     } else {
       dropHold();
-      setExtras((e) => [...e, s]);
+      setExtras((e) => [...e, ...fresh]);
     }
     setSlots(null);
     setAddOpen(false);
     setNotice(null);
+    return true;
   }
-  function removeService(id: number) {
-    if (visitServices.length < 2) return; // tiene que quedar al menos uno
+  function addExtra(s: Service) {
+    if (!addMany([s])) return;
+    warnIfPackBreaks([...visitServices, s]);
+  }
+  // Quita un servicio de la lista (por posición: el mismo servicio puede estar dos veces, para ti y para tu acompañante)
+  function removeAt(i: number) {
+    if (visitServices.length < 2) return;
+    const next = visitServices.filter((_, k) => k !== i);
     if (apart) {
-      const idx = legs.findIndex((l) => l.service.id === id);
-      if (idx < 0) return;
-      if (legs[idx].hold) void release(legs[idx].hold as Hold);
-      const rest = legs.filter((_, i) => i !== idx);
+      const gone = legs[i];
+      if (!gone) return;
+      if (gone.hold) void release(gone.hold);
+      const rest = legs.filter((_, k) => k !== i);
       if (rest.length === 1) {
         // queda una sola cita: vuelve a «todo seguido» conservando su hueco
         const only = rest[0];
@@ -385,32 +514,44 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         setActiveLeg(0);
         setService(only.service);
         setExtras([]);
+        setAddonsT(only.addons);
         setHoldT(only.hold);
         setDayT(only.day);
       } else {
         commitLegs(rest);
-        setActiveLeg(Math.min(activeLeg > idx ? activeLeg - 1 : activeLeg, rest.length - 1));
+        setActiveLeg(Math.min(activeLeg > i ? activeLeg - 1 : activeLeg, rest.length - 1));
       }
     } else {
       dropHold();
-      if (service && id === service.id) {
+      const ownCount = 1 + extras.length;
+      if (i >= ownCount) {
+        const rest = compServices.filter((_, k) => k !== i - ownCount);
+        setCompServices(rest);
+        if (!rest.length) setCompName("");
+      } else if (i === 0) {
         const [first, ...rest] = extras;
         if (first) {
           setService(first);
           setExtras(rest);
         }
       } else {
-        setExtras((e) => e.filter((x) => x.id !== id));
+        setExtras((e) => e.filter((_, k) => k !== i - 1));
       }
     }
     setSlots(null);
-    setNotice(null);
+    warnIfPackBreaks(next);
   }
-  // «Todo seguido» ⇄ «Cada servicio a su hora»
+  // «Todo seguido» ⇄ «Cada uno a su hora»
   function goApart() {
-    if (visitServices.length < 2) return;
+    if (visitServices.length < 2 || visitServices.length > MAX_LEGS || compServices.length) return;
     dropHold();
-    setLegs(visitServices.map((s) => ({ service: s, day: null, hold: null })));
+    const ls: Leg[] = visitServices.map((s) => ({ service: s, day: null, hold: null, addons: [] }));
+    for (const id of addonsT) {
+      const a = addons.find((x) => x.id === id);
+      const li = ls.findIndex((l) => !a?.category || l.service.category === a.category);
+      if (li >= 0) ls[li].addons.push(id);
+    }
+    setLegs(ls);
     setActiveLeg(0);
     setApart(true);
     setSlots(null);
@@ -418,12 +559,14 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   }
   function goTogether() {
     const sv = legs.map((l) => l.service);
+    const ad = Array.from(new Set(legs.flatMap((l) => l.addons)));
     dropHold();
     setApart(false);
     setLegs([]);
     setActiveLeg(0);
     setService(sv[0] ?? null);
     setExtras(sv.slice(1));
+    setAddonsT(ad);
     setDayT(null);
     setSlots(null);
     setNotice(null);
@@ -436,28 +579,88 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     const d = legs[i].day;
     if (d) setMonth(d.slice(0, 7));
   }
-  function chooseService(s: Service) {
+  // Empezar con una lista de servicios (un pack, «repetir lo de la última vez»…)
+  function chooseVisit(list: Service[]) {
+    if (!list.length) return;
     dropHold();
     setApart(false);
     setLegs([]);
     setActiveLeg(0);
-    setExtras([]);
+    setService(list[0]);
+    setExtras(list.slice(1, MAX_SERVICES));
+    setAddonsT([]);
+    setCompServices([]);
+    setCompName("");
+    setCompDraft([]);
+    setCompOpen(false);
     setAddOpen(false);
-    setService(s);
     setSlots(null);
     setDayT(null);
     setNotice(null);
     setStep(multiStaff ? "staff" : "time");
   }
+  const chooseService = (s: Service) => chooseVisit([s]);
+  const packServices = (p: Pack) => p.serviceSlugs.map((slug) => services.find((x) => x.slug === slug)).filter((x): x is Service => !!x);
+  function choosePack(p: Pack) {
+    const sv = packServices(p);
+    if (sv.length === p.serviceSlugs.length) chooseVisit(sv);
+  }
   function chooseStaff(id: number | null) {
     dropHold();
     setStaffChoice(id);
     setSlots(null);
-    setDay(null);
     setDayT(null);
     setLegs((ls) => ls.map((l) => ({ ...l, day: null })));
     setNotice(null);
     setStep("time");
+  }
+  // Extras: suman tiempo y precio, así que el hueco guardado se libera y se vuelve a elegir
+  function toggleAddon(id: number) {
+    setNotice(null);
+    if (apart) {
+      const leg = legs[activeLeg];
+      if (!leg) return;
+      if (leg.hold) void release(leg.hold);
+      setLegs((ls) => ls.map((l, i) => (i === activeLeg ? { ...l, hold: null, addons: l.addons.includes(id) ? l.addons.filter((x) => x !== id) : [...l.addons, id] } : l)));
+    } else {
+      dropHold();
+      setAddonsT((a) => (a.includes(id) ? a.filter((x) => x !== id) : [...a, id]));
+    }
+    setSlots(null);
+  }
+  // Acompañante: sus servicios van detrás de los tuyos, en el mismo bloque
+  function toggleCompDraft(id: number) {
+    setCompDraft((d) => (d.includes(id) ? d.filter((x) => x !== id) : [...d, id]));
+  }
+  function addCompanion() {
+    const picked = compDraft.map((id) => services.find((s) => s.id === id)).filter((s): s is Service => !!s);
+    if (compName.trim().length < 2 || !picked.length) {
+      setNotice({ tone: "error", text: T.companionNeedName });
+      return;
+    }
+    if (visitServices.length + picked.length > MAX_SERVICES) {
+      setNotice({ tone: "error", text: T.divaFull });
+      return;
+    }
+    dropHold();
+    setCompServices(picked);
+    setCompOpen(false);
+    setSlots(null);
+    warnIfPackBreaks([...visitServices, ...picked]);
+  }
+  function removeCompanion() {
+    dropHold();
+    setCompServices([]);
+    setCompName("");
+    setCompDraft([]);
+    setSlots(null);
+    warnIfPackBreaks(visitServices.slice(0, 1 + extras.length));
+  }
+  // Atajos: coge el hueco y lo bloquea en un toque
+  async function pickShortcut(slot: Slot) {
+    setMonth(slot.day.slice(0, 7));
+    setDay(slot.day);
+    await pickSlot(slot);
   }
   // Nueva cita: se conservan nombre, teléfono y email para no escribirlos otra vez
   function reset() {
@@ -467,6 +670,12 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setActiveLeg(0);
     setService(null);
     setExtras([]);
+    setAddonsT([]);
+    setCompServices([]);
+    setCompName("");
+    setCompDraft([]);
+    setCompOpen(false);
+    setAcks({});
     setAddOpen(false);
     setStaffChoice(null);
     setSlots(null);
@@ -475,6 +684,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setDoneAll([]);
     setNotice(null);
     setForm((f) => ({ ...f, notes: "" }));
+    setHistory(loadVisitHistory());
     setStep("service");
   }
   // Paso anterior; devuelve true si ha cambiado de paso. El botón "Atrás" del móvil usa la misma lógica.
@@ -501,8 +711,21 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     setMonth(new Date(Date.UTC(y, m - 1 + delta, 1)).toISOString().slice(0, 7));
   }
 
-  // Desde el avatar: añadir un servicio a la visita con un toque
-  function addFromAvatar(slug: string): "added" | "chosen" | "already" | "full" | "missing" {
+  // Desde Diva: añadir un servicio (o un pack entero) con un toque
+  function addFromAvatar(slug: string, kind: "service" | "pack" = "service"): "added" | "chosen" | "already" | "full" | "missing" {
+    if (kind === "pack") {
+      const p = packs.find((x) => x.slug === slug);
+      if (!p) return "missing";
+      const sv = packServices(p);
+      if (sv.length !== p.serviceSlugs.length) return "missing";
+      if (step === "service" || !service) {
+        chooseVisit(sv);
+        return "chosen";
+      }
+      if (step === "done" || step === "details") return "missing";
+      if (sv.every((s) => visitServices.some((v) => v.id === s.id))) return "already";
+      return addMany(sv) ? "added" : "full";
+    }
     const s = services.find((x) => x.slug === slug);
     if (!s) return "missing";
     if (visitServices.some((v) => v.id === s.id)) return "already";
@@ -511,18 +734,26 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       return "chosen";
     }
     if (step === "done" || step === "details") return "missing";
-    if (visitServices.length >= 4) return "full";
+    if (visitServices.length >= (apart ? MAX_LEGS : MAX_SERVICES)) return "full";
     addExtra(s);
     return "added";
+  }
+
+  // Los comentarios para el salón (en castellano) llevan al acompañante y sus servicios
+  function composeNotes(): string {
+    const own = form.notes.trim();
+    if (!compServices.length || !compName.trim()) return own;
+    const line = fill(getDict("es").companionNote, { name: compName.trim(), services: compServices.map((s) => s.name).join(" + ") });
+    return (own ? `${line}\n${own}` : line).slice(0, 500);
   }
 
   /* ---------- confirmar ---------- */
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (submitting || !allHeld) return;
+    if (submitting || !allHeld || !allAcked) return;
     setSubmitting(true);
     setNotice(null);
-    const who = { name: form.name, phone: form.phone, email: form.email, notes: form.notes, website: form.website };
+    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, ...(kinds.length ? { acks: [...kinds] } : {}) };
     try {
       const r = await fetch(apart ? "/api/bookings/batch" : "/api/bookings", {
         method: "POST",
@@ -536,7 +767,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       const j = await r.json();
       if (!r.ok) {
         const code = j?.error?.code as string | undefined;
-        setNotice({ tone: "error", text: j?.error?.message ?? "No pudimos confirmar la cita." });
+        setNotice({ tone: "error", text: errText(code, T.couldNotConfirm, j?.error?.message) });
         if (code === "SLOT_TAKEN" || code === "HOLD_EXPIRED" || code === "NOT_FOUND") {
           // una de las horas ya no vale: se liberan todas (el servidor no dice cuál) y se vuelve a elegir
           dropHold();
@@ -555,7 +786,10 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
         return;
       }
       const list = (apart ? j.bookings : [j.booking]) as Done[];
-      for (const b of list) saveBooking(b.code, b.token);
+      for (const b of list) {
+        saveBooking(b.code, b.token);
+        saveVisitHistory({ startsAt: b.startsAt, slugs: services.filter((s) => b.serviceName.includes(s.name)).map((s) => s.slug) });
+      }
       allHoldsRef.current = [];
       holdRef.current = null;
       setDoneAll(list);
@@ -563,7 +797,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
       clearAllHolds(); // confirmadas: no hay nada que liberar
       setStep("done");
     } catch {
-      setNotice({ tone: "error", text: "Sin conexión. Tus huecos siguen guardados: inténtalo otra vez." });
+      setNotice({ tone: "error", text: T.noConnConfirm });
     } finally {
       setSubmitting(false);
     }
@@ -590,12 +824,50 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
   const order = useMemo(() => new Map(services.map((s, i) => [s.id, i])), [services]);
   const avatarState: AvatarState = step === "done" ? "done" : step === "details" ? "typing" : allHolds.length ? "held" : "browse";
   const nextPendingIdx = apart ? legs.findIndex((l) => !l.hold) : -1;
+  const curAddonDur = curAddonIds.reduce((a, id) => a + (addons.find((x) => x.id === id)?.durationMin ?? 0), 0);
   // Si van en horas distintas, el tramo de las otras citas se marca para no solaparlas
-  const otherSpans = apart ? legs.flatMap((l, i) => (i !== activeLeg && l.hold ? [{ start: new Date(l.hold.startsAt).getTime(), end: new Date(l.hold.endsAt).getTime(), name: l.service.name }] : [])) : [];
-  const curDurMs = (availServices[0]?.durationMin ?? 0) * 60000;
-  const nextMonthLabel = fmtMonth(new Date(Date.UTC(yy, mm, 1)).toISOString().slice(0, 7));
+  const otherSpans = apart ? legs.flatMap((l, i) => (i !== activeLeg && l.hold ? [{ start: new Date(l.hold.startsAt).getTime(), end: new Date(l.hold.endsAt).getTime(), name: L(l.service).name }] : [])) : [];
+  const curDurMs = ((availServices[0]?.durationMin ?? 0) + curAddonDur) * 60000;
+  const nextMonthLabel = fmtMonth(new Date(Date.UTC(yy, mm, 1)).toISOString().slice(0, 7), locale);
   const staffName = hold?.staffName ?? (staffChoice ? staff.find((s) => s.id === staffChoice)?.name : null);
   const stepIndex = stepOrder.indexOf(step);
+  const eligibleAddons = addons.filter((a) => !a.category || availServices.some((s) => s.category === a.category));
+  const lastSlugs = history.length ? history[history.length - 1].slugs : [];
+  const lastServices = lastSlugs.map((slug) => services.find((s) => s.slug === slug)).filter((s): s is Service => !!s);
+  const suggestions = useMemo(
+    () => (apart ? [] : suggest({ have: visitServices.map((s) => s.slug), catalog: services.map((s) => s.slug), packs, maxServices: MAX_SERVICES, max: 3 })),
+    [apart, visitServices, services, packs],
+  );
+  const packOf = (slug: string) => packs.find((p) => p.slug === slug);
+
+  // Atajos: «lo antes posible», «esta tarde» y «como siempre» (según tus visitas anteriores en este móvil)
+  const tomorrow = addDays(today, 1);
+  const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  const whenLabel = (s: Slot) => `${s.day === today ? T.today : s.day === tomorrow ? T.tomorrow : fmtShortDay(s.day, locale)} · ${s.time}`;
+  const quick = useMemo(() => {
+    const out: { key: string; label: string; when: string; hint?: string; slot: Slot }[] = [];
+    if (!soon) return out;
+    const free = soon.filter((s) => s.available).sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+    const first = free[0];
+    if (first) out.push({ key: "soon", label: T.soonest, when: whenLabel(first), slot: first });
+    const aft = free.find((s) => Number(s.time.slice(0, 2)) >= 15);
+    if (aft && aft.startsAt !== first?.startsAt) {
+      const label = aft.day === today ? T.thisAfternoon : aft.day === tomorrow ? T.tomorrowAfternoon : `${fmtShortDay(aft.day, locale)} · ${T.afternoon.toLowerCase()}`;
+      out.push({ key: "aft", label, when: whenLabel(aft), slot: aft });
+    }
+    const usual = usualOf(history);
+    if (usual) {
+      const near = free
+        .map((s) => ({ s, p: localParts(s.startsAt) }))
+        .filter((x) => x.p.dow === usual.dow && Math.abs(x.p.minutes - usual.minutes) <= 45)
+        .sort((a, b) => (a.p.day === b.p.day ? Math.abs(a.p.minutes - usual.minutes) - Math.abs(b.p.minutes - usual.minutes) : a.p.day < b.p.day ? -1 : 1))[0];
+      if (near && near.s.startsAt !== first?.startsAt) {
+        out.push({ key: "usual", label: T.asUsual, when: whenLabel(near.s), hint: t("asUsualHint", { weekday: weekdayName(usual.dow, locale), time: hm(usual.minutes) }), slot: near.s });
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soon, history, lang, today]);
 
   // Entrada 260 ms ease-out; salida más rápida (140 ms). Con "reducir movimiento" se mantiene solo el fundido.
   // `transform` completo (no x/y) para que la animación no dependa del hilo principal.
@@ -628,10 +900,10 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                 key={s.startsAt}
                 type="button"
                 className={`slot ${mine ? "slot--mine" : ""} ${taken ? "slot--taken" : ""} ${clash ? "slot--yours" : ""} ${range ? "slot--range" : ""}`}
-                title={clash ? `Coincide con tu cita de ${clash.name}` : range && hold ? `Parte de tu cita (${fmtHM(hold.startsAt)} a ${fmtHM(hold.endsAt)}). Púlsalo para mover tu cita aquí.` : undefined}
+                title={clash ? t("slotClashTitle", { name: clash.name }) : range && hold ? t("slotRangeTitle", { from: fmtHM(hold.startsAt), to: fmtHM(hold.endsAt) }) : undefined}
                 disabled={taken || !!clash || busySlot === s.startsAt}
                 aria-pressed={mine}
-                aria-label={clash ? `${s.time}, coincide con tu cita de ${clash.name}` : taken ? `${s.time}, ocupado` : mine ? `${s.time}, bloqueado para ti` : range ? `${s.time}, parte de tu cita` : s.time}
+                aria-label={clash ? t("slotClash", { time: s.time, name: clash.name }) : taken ? t("slotTaken", { time: s.time }) : mine ? t("slotMine", { time: s.time }) : range ? t("slotRange", { time: s.time }) : s.time}
                 onClick={() => void pickSlot(s)}
               >
                 {mine && (
@@ -660,7 +932,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
     <div className="flow">
       <div className="flow__main">
         {step !== "done" && (
-          <ol className="progress" aria-label="Progreso de la reserva">
+          <ol className="progress" aria-label={T.progress}>
             {stepOrder.map((s, i) => (
               <li key={s} className={i < stepIndex ? "is-done" : i === stepIndex ? "is-current" : ""} aria-current={i === stepIndex ? "step" : undefined}>
                 <span className="progress__dot">{i < stepIndex ? <Check size={12} aria-hidden="true" /> : i + 1}</span>
@@ -681,21 +953,66 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {/* ---------------- SERVICIO ---------------- */}
             {step === "service" && (
               <>
-                <Link href="/" className="back"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio</Link>
-                <h2 className="panel__title">¿Qué te hacemos?</h2>
+                <Link href="/" className="back"><ArrowLeft size={16} aria-hidden="true" /> {T.backHome}</Link>
+                <h2 className="panel__title">{T.whatDoWeDo}</h2>
+                {lastServices.length > 0 && (
+                  <button type="button" className="repeat" onClick={() => chooseVisit(lastServices)}>
+                    <span className="repeat__ico">🔁</span>
+                    <span><strong>{T.repeatLast}</strong><small>{names(lastServices)}</small></span>
+                  </button>
+                )}
+                {packs.length > 0 && (
+                  <div className="packs">
+                    <h3>🎁 {T.packsTitle}</h3>
+                    <p className="muted small">{T.packsSub}</p>
+                    <ul className="pack-list">
+                      {packs.map((p) => {
+                        const sv = packServices(p);
+                        if (sv.length !== p.serviceSlugs.length) return null; // algún servicio del pack ya no está disponible
+                        const full = sv.reduce((a, s) => a + s.priceCents, 0);
+                        const price = sv.reduce((a, s) => a + discounted(s.priceCents, p.discountPercent), 0);
+                        const lp = L(p);
+                        return (
+                          <li key={p.id}>
+                            <button type="button" className="pack" onClick={() => choosePack(p)} aria-label={`${lp.name}: ${T.packPick}`}>
+                              <span className="pack__emoji" aria-hidden="true">{p.emoji}</span>
+                              <span className="pack__main">
+                                <strong>{lp.name}</strong>
+                                {lp.description && <small>{lp.description}</small>}
+                                <em>{names(sv)}</em>
+                              </span>
+                              <span className="pack__meta">
+                                <b>{fmtDuration(sv.reduce((a, s) => a + s.durationMin, 0))}</b>
+                                {p.discountPercent > 0 ? (
+                                  <>
+                                    <s>{money(full)}</s>
+                                    <b className="pack__price">{money(price)}</b>
+                                    <span className="pack__save">{t("packSave", { percent: p.discountPercent })}</span>
+                                  </>
+                                ) : (
+                                  <b className="pack__price">{money(full)}</b>
+                                )}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
                 {groups.map((g) => (
                   <div key={g.category} className="pick-group">
-                    <h3>{g.category}</h3>
+                    <h3>{localCategory(g.category, lang)}</h3>
                     <ul className="pick-list">
                       {g.items.map((s) => (
                         <li key={s.id}>
                           <button type="button" className={`pick ${service?.id === s.id ? "is-on" : ""}`} style={{ ["--i" as string]: Math.min(order.get(s.id) ?? 0, 6) } as React.CSSProperties} onClick={() => chooseService(s)}>
                             <span className="pick__main">
-                              <strong>{s.name}</strong>
-                              {s.description && <small>{s.description}</small>}
+                              <strong>{L(s).name}</strong>
+                              {L(s).description && <small>{L(s).description}</small>}
                             </span>
                             <span className="pick__meta">{fmtDuration(s.durationMin)}</span>
-                            <span className="pick__price">{fmtPrice(s.priceCents)}</span>
+                            <span className="pick__price">{money(s.priceCents)}</span>
                           </button>
                         </li>
                       ))}
@@ -708,14 +1025,14 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {/* ---------------- PROFESIONAL ---------------- */}
             {step === "staff" && (
               <>
-                <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> Cambiar servicio</button>
-                <h2 className="panel__title">¿Con quién?</h2>
+                <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> {T.changeService}</button>
+                <h2 className="panel__title">{T.withWho}</h2>
                 <ul className="pick-list">
                   <li>
                     <button type="button" className={`pick ${staffChoice === null ? "is-on" : ""}`} onClick={() => chooseStaff(null)}>
                       <span className="pick__main">
-                        <strong>La primera que esté libre</strong>
-                        <small>Más huecos para elegir</small>
+                        <strong>{T.firstFree}</strong>
+                        <small>{T.moreSlots}</small>
                       </span>
                       <Sparkles size={18} aria-hidden="true" />
                     </button>
@@ -735,19 +1052,22 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {step === "time" && service && (
               <>
                 <button type="button" className="back" onClick={back}>
-                  <ArrowLeft size={16} aria-hidden="true" /> {multiStaff ? "Cambiar profesional" : "Cambiar servicio"}
+                  <ArrowLeft size={16} aria-hidden="true" /> {multiStaff ? T.changeStaff : T.changeService}
                 </button>
-                <h2 className="panel__title">{apart && cur ? `Elige la hora de ${cur.service.name}` : "Elige tu hueco"}</h2>
+                <h2 className="panel__title">{apart && cur ? t("chooseSlotFor", { name: L(cur.service).name }) : T.chooseSlot}</h2>
 
                 <div className="visit">
-                  <p className="visit__title">Tu cita: <b>{fmtDuration(totalDuration)}</b> · <b>{fmtPrice(totalPrice)}</b></p>
-                  {visitServices.length > 1 && (
-                    <div className="seg" role="radiogroup" aria-label="Cómo quieres tu visita">
+                  <p className="visit__title">{T.yourVisit}: <b>{fmtDuration(totalDuration)}</b> · <b>{money(totalPrice)}</b></p>
+                  {matchedPack && (
+                    <p className="visit__pack">{matchedPack.emoji} {packSaving > 0 ? t("packSavedLine", { name: L(matchedPack).name, amount: money(packSaving) }) : t("packBadge", { name: L(matchedPack).name })}</p>
+                  )}
+                  {visitServices.length > 1 && visitServices.length <= MAX_LEGS && !compServices.length && (
+                    <div className="seg" role="radiogroup" aria-label={T.howVisit}>
                       <button type="button" role="radio" aria-checked={!apart} className={`seg__btn ${!apart ? "is-on" : ""}`} onClick={goTogether}>
-                        <strong>Todo seguido</strong><small>Un solo bloque</small>
+                        <strong>{T.allTogether}</strong><small>{T.oneBlock}</small>
                       </button>
                       <button type="button" role="radio" aria-checked={apart} className={`seg__btn ${apart ? "is-on" : ""}`} onClick={goApart}>
-                        <strong>Cada uno a su hora</strong><small>Días y horas distintos</small>
+                        <strong>{T.eachOwn}</strong><small>{T.differentDays}</small>
                       </button>
                     </div>
                   )}
@@ -758,27 +1078,67 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                           <button type="button" className="leg__main" onClick={() => selectLeg(i)} aria-current={i === activeLeg ? "step" : undefined}>
                             <span className="leg__n">{l.hold ? <Check size={14} aria-hidden="true" /> : i + 1}</span>
                             <span className="leg__txt">
-                              <strong>{l.service.name} <small>{fmtDuration(l.service.durationMin)}</small></strong>
-                              <em>{l.hold ? fmtLong(l.hold.startsAt) : i === activeLeg ? "Elige su hora aquí abajo" : "Toca para elegir su hora"}</em>
+                              <strong>{L(l.service).name} <small>{fmtDuration(l.service.durationMin)}</small></strong>
+                              <em>{l.hold ? fmtLong(l.hold.startsAt, locale) : i === activeLeg ? T.pickTimeBelow : T.tapToPick}</em>
                             </span>
                           </button>
-                          <button type="button" className="leg__x" onClick={() => removeService(l.service.id)} aria-label={`Quitar ${l.service.name}`}>Quitar</button>
+                          <button type="button" className="leg__x" onClick={() => removeAt(i)} aria-label={t("removeX", { name: L(l.service).name })}>{T.remove}</button>
                         </li>
                       ))}
                     </ol>
                   ) : (
                     <ul className="visit__list">
-                      {visitServices.map((x) => (
-                        <li key={x.id}>
-                          <span>{x.name} <small>{fmtDuration(x.durationMin)}</small></span>
-                          {visitServices.length > 1 && <button type="button" onClick={() => removeService(x.id)} aria-label={`Quitar ${x.name}`}>Quitar</button>}
+                      {visitServices.map((x, i) => (
+                        <li key={`${x.id}-${i}`}>
+                          <span>
+                            {L(x).name} <small>{fmtDuration(x.durationMin)}</small>
+                            {i >= 1 + extras.length && <em className="visit__for"> · {t("companionOf", { name: compName })}</em>}
+                          </span>
+                          {visitServices.length > 1 && <button type="button" onClick={() => removeAt(i)} aria-label={t("removeX", { name: L(x).name })}>{T.remove}</button>}
                         </li>
                       ))}
                     </ul>
                   )}
-                  {visitServices.length < 4 && (
+
+                  {suggestions.length > 0 && (
+                    <div className="sugg" aria-label={T.suggestTitle}>
+                      <p className="sugg__title">✨ {T.suggestTitle}</p>
+                      <div className="sugg__row">
+                        {suggestions.map((sg) => {
+                          const sv = sg.add.map((slug) => services.find((s) => s.slug === slug)).filter((s): s is Service => !!s);
+                          const pk = sg.kind === "pack" ? packOf(sg.packSlug) : undefined;
+                          const reason = sg.kind === "pack" && pk ? (sg.percent > 0 ? t("suggestCompletesSave", { pack: L(pk).name, percent: sg.percent }) : t("suggestCompletes", { pack: L(pk).name })) : sg.kind === "pair" ? T[sg.reason] : "";
+                          return (
+                            <button key={sg.key} type="button" className="sugg__chip" onClick={() => { addMany(sv); }}>
+                              <strong>{t("suggestAdd", { name: names(sv) })}</strong>
+                              <small>{reason}</small>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {eligibleAddons.length > 0 && (
+                    <div className="extras">
+                      <p className="extras__title">{T.extrasTitle}</p>
+                      <div className="extras__row">
+                        {eligibleAddons.map((a) => {
+                          const on = curAddonIds.includes(a.id);
+                          return (
+                            <button key={a.id} type="button" className={`extra ${on ? "is-on" : ""}`} aria-pressed={on} onClick={() => toggleAddon(a.id)} title={L(a).description ?? undefined}>
+                              <span className="extra__box" aria-hidden="true">{on ? <Check size={12} /> : "+"}</span>
+                              <span><strong>{L(a).name}</strong><small>{t("extraLine", { dur: fmtDuration(a.durationMin), price: money(a.priceCents) })}</small></span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {visitServices.length < (apart ? MAX_LEGS : MAX_SERVICES) && (
                     <button type="button" className="visit__add" onClick={() => setAddOpen((o) => !o)} aria-expanded={addOpen}>
-                      {addOpen ? "Cerrar" : "＋ Añadir otro servicio a la misma visita"}
+                      {addOpen ? T.close : T.addService}
                     </button>
                   )}
                   {addOpen && (
@@ -786,28 +1146,81 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                       {services.filter((x) => !visitServices.some((v) => v.id === x.id)).map((x) => (
                         <li key={x.id}>
                           <button type="button" onClick={() => addExtra(x)}>
-                            <span>{x.name}<small>{fmtDuration(x.durationMin)}</small></span>
-                            <b>{fmtPrice(x.priceCents)}</b>
+                            <span>{L(x).name}<small>{fmtDuration(x.durationMin)}</small></span>
+                            <b>{money(x.priceCents)}</b>
                           </button>
                         </li>
                       ))}
                     </ul>
                   )}
+
+                  {!apart && (
+                    <div className="comp">
+                      {compServices.length ? (
+                        <div className="comp__sum">
+                          <span>👯 {t("companionOf", { name: compName })}: <b>{names(compServices)}</b></span>
+                          <button type="button" className="comp__x" onClick={removeCompanion}>{T.companionRemove}</button>
+                        </div>
+                      ) : (
+                        <>
+                          <button type="button" className="visit__add comp__open" onClick={() => setCompOpen((o) => !o)} aria-expanded={compOpen}>
+                            👯 {T.companionTitle}
+                          </button>
+                          {compOpen && (
+                            <div className="comp__form">
+                              <p className="muted small">{T.companionSub}</p>
+                              <label className="field">
+                                <span>{T.companionName}</span>
+                                <input value={compName} onChange={(e) => setCompName(e.target.value)} maxLength={40} autoComplete="off" />
+                              </label>
+                              <p className="comp__pick">{T.companionPick}</p>
+                              <div className="comp__list">
+                                {services.map((s) => {
+                                  const on = compDraft.includes(s.id);
+                                  return (
+                                    <button key={s.id} type="button" className={`extra ${on ? "is-on" : ""}`} aria-pressed={on} onClick={() => toggleCompDraft(s.id)}>
+                                      <span className="extra__box" aria-hidden="true">{on ? <Check size={12} /> : "+"}</span>
+                                      <span><strong>{L(s).name}</strong><small>{fmtDuration(s.durationMin)} · {money(s.priceCents)}</small></span>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <button type="button" className="btn btn--primary btn--sm" onClick={addCompanion}>{T.companionAdd}</button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                <div className="cal" aria-label="Calendario">
+                {quick.length > 0 && (
+                  <div className="quick" aria-label={T.quickTitle}>
+                    <p className="quick__title">⚡ {T.quickTitle}</p>
+                    <div className="quick__row">
+                      {quick.map((q) => (
+                        <button key={q.key} type="button" className="quick__chip" title={q.hint} onClick={() => void pickShortcut(q.slot)} disabled={!!busySlot}>
+                          <strong>{q.label}</strong>
+                          <small>{q.when}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="cal" aria-label={T.calendar}>
                   <div className="cal__head">
-                    <button type="button" className="icon-btn" onClick={() => shiftMonth(-1)} disabled={!canPrev} aria-label="Mes anterior">
+                    <button type="button" className="icon-btn" onClick={() => shiftMonth(-1)} disabled={!canPrev} aria-label={T.prevMonth}>
                       <ChevronLeft size={18} aria-hidden="true" />
                     </button>
-                    <strong aria-live="polite">{fmtMonth(month)}</strong>
-                    <button type="button" className="icon-btn" onClick={() => shiftMonth(1)} disabled={!canNext} aria-label="Mes siguiente">
+                    <strong aria-live="polite">{fmtMonth(month, locale)}</strong>
+                    <button type="button" className="icon-btn" onClick={() => shiftMonth(1)} disabled={!canNext} aria-label={T.nextMonth}>
                       <ChevronRight size={18} aria-hidden="true" />
                     </button>
                   </div>
                   <div className="cal__grid" role="grid">
-                    {WEEK.map((w) => (
-                      <span key={w} className="cal__wd" role="columnheader">{w}</span>
+                    {weekInit.map((w, i) => (
+                      <span key={i} className="cal__wd" role="columnheader">{w}</span>
                     ))}
                     {Array.from({ length: lead }).map((_, i) => (
                       <span key={`b${i}`} />
@@ -825,7 +1238,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                           role="gridcell"
                           className={`cal__day ${free ? "is-free" : ""} ${full ? "is-full" : ""} ${sel ? "is-sel" : ""}`}
                           disabled={!free}
-                          aria-label={`${fmtDayLabel(ds)}${free ? "" : full ? ", completo" : ", sin disponibilidad"}`}
+                          aria-label={`${fmtDayLabel(ds, locale)}${free ? "" : full ? T.dayFull : T.dayNone}`}
                           aria-pressed={sel}
                           onClick={() => setDay(ds)}
                         >
@@ -834,13 +1247,13 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                       );
                     })}
                   </div>
-                  {slots === null && <p className="muted" aria-live="polite">Cargando huecos…</p>}
+                  {slots === null && <p className="muted" aria-live="polite">{T.loadingSlots}</p>}
                   {slots !== null && Object.keys(dayInfo).length === 0 && (
                     <div className="empty">
-                      <p className="muted">No quedan huecos en {fmtMonth(month)}.</p>
+                      <p className="muted">{t("noSlotsMonth", { month: fmtMonth(month, locale) })}</p>
                       {canNext && (
                         <button type="button" className="btn btn--ghost btn--sm" onClick={() => shiftMonth(1)}>
-                          Ver {nextMonthLabel} <ChevronRight size={16} aria-hidden="true" />
+                          {t("seeMonth", { month: nextMonthLabel })} <ChevronRight size={16} aria-hidden="true" />
                         </button>
                       )}
                     </div>
@@ -849,13 +1262,13 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
 
                 {day && (
                   <div className="slots" aria-live="polite">
-                    <h3 className="slots__day">{fmtDayLabel(day)}</h3>
-                    {renderSlots("Mañana", morning)}
-                    {renderSlots("Tarde", afternoon)}
+                    <h3 className="slots__day">{fmtDayLabel(day, locale)}</h3>
+                    {renderSlots(T.morning, morning)}
+                    {renderSlots(T.afternoon, afternoon)}
                     <p className="legend">
-                      <Lock size={12} aria-hidden="true" /> Ocupado o bloqueado por otra persona
-                      {hold && <span className="legend__range"> · Tramo de tu cita: pulsa otra hora para moverla</span>}
-                      {otherSpans.length > 0 && <span className="legend__yours"> · Coincide con tu otra cita</span>}
+                      <Lock size={12} aria-hidden="true" /> {T.legendTaken}
+                      {hold && <span className="legend__range"> · {T.legendRange}</span>}
+                      {otherSpans.length > 0 && <span className="legend__yours"> · {T.legendClash}</span>}
                     </p>
                   </div>
                 )}
@@ -866,8 +1279,9 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                     serviceId={availServices[0]?.id ?? service.id}
                     serviceIds={availServices.map((x) => x.id)}
                     day={day}
-                    dayLabel={day ? fmtDayLabel(day) : undefined}
+                    dayLabel={day ? fmtDayLabel(day, locale) : undefined}
                     source="web"
+                    lang={lang}
                     startOpen={Object.keys(dayInfo).length === 0}
                   />
                 )}
@@ -886,31 +1300,31 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                         <div>
                           {apart ? (
                             <>
-                              <strong>{allHeld ? "Todas tus horas están guardadas" : `${allHolds.length} de ${legs.length} horas guardadas`}</strong>
-                              {legs.length <= 3 && legs.filter((l) => l.hold).map((l) => <span key={l.service.id}>{l.service.name}: {fmtLong((l.hold as Hold).startsAt)}</span>)}
+                              <strong>{allHeld ? T.holdsAll : t("holdsSome", { n: allHolds.length, total: legs.length })}</strong>
+                              {legs.length <= 3 && legs.filter((l) => l.hold).map((l) => <span key={l.service.id}>{L(l.service).name}: {fmtLong((l.hold as Hold).startsAt, locale)}</span>)}
                             </>
                           ) : (
                             hold && (
                               <>
-                                <strong>Hueco bloqueado para ti</strong>
-                                <span>{fmtLong(hold.startsAt)}</span>
-                                {hold.endsAt && <span>Ocupa de {fmtHM(hold.startsAt)} a {fmtHM(hold.endsAt)} ({fmtDuration(totalDuration)})</span>}
+                                <strong>{T.holdTitle}</strong>
+                                <span>{fmtLong(hold.startsAt, locale)}</span>
+                                {hold.endsAt && <span>{t("holdOccupies", { from: fmtHM(hold.startsAt), to: fmtHM(hold.endsAt), dur: fmtDuration(totalDuration) })}</span>}
                               </>
                             )
                           )}
                         </div>
-                        <span className="holdbar__time" aria-label={`Quedan ${mmss}`}>{mmss}</span>
+                        <span className="holdbar__time" aria-label={t("timeLeft", { t: mmss })}>{mmss}</span>
                       </div>
                       <div className="holdbar__track" aria-hidden="true">
                         <i style={{ width: `${(remaining / holdTotalSec) * 100}%` }} />
                       </div>
                       {apart && !allHeld ? (
                         <button type="button" className="btn btn--primary btn--block" onClick={() => selectLeg(nextPendingIdx)}>
-                          Ahora, la hora de {legs[nextPendingIdx]?.service.name}
+                          {t("holdNext", { name: nextPendingIdx >= 0 ? L(legs[nextPendingIdx].service).name : "" })}
                         </button>
                       ) : (
                         <button type="button" className="btn btn--primary btn--block" onClick={() => setStep("details")}>
-                          Continuar
+                          {T.continue}
                         </button>
                       )}
                     </motion.div>
@@ -922,48 +1336,66 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {/* ---------------- DATOS ---------------- */}
             {step === "details" && allHeld && (
               <>
-                <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> Cambiar hueco</button>
-                <h2 className="panel__title">Tus datos</h2>
+                <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> {T.changeSlot}</button>
+                <h2 className="panel__title">{T.yourData}</h2>
                 <div className="holdmini" role="timer" aria-live="off">
-                  <Clock size={15} aria-hidden="true" /> {apart ? "Tus huecos están guardados" : "Tu hueco está guardado"}: quedan <strong>{mmss}</strong>
+                  <Clock size={15} aria-hidden="true" /> {apart ? T.holdMiniMany : T.holdMiniOne}: {T.remaining} <strong>{mmss}</strong>
                 </div>
                 {apart && (
-                  <ul className="legsum" aria-label="Tus citas">
+                  <ul className="legsum" aria-label={T.yourAppointments}>
                     {legs.map((l) => (
-                      <li key={l.service.id}><strong>{l.service.name}</strong><span>{l.hold ? fmtLong(l.hold.startsAt) : ""}</span></li>
+                      <li key={l.service.id}><strong>{L(l.service).name}</strong><span>{l.hold ? fmtLong(l.hold.startsAt, locale) : ""}</span></li>
                     ))}
                   </ul>
                 )}
                 <form onSubmit={submit} className="form" noValidate={false}>
                   <label className="field">
-                    <span>Nombre</span>
+                    <span>{T.name}</span>
                     <input required autoComplete="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} maxLength={80} />
                   </label>
                   <label className="field">
-                    <span>Teléfono</span>
+                    <span>{T.phone}</span>
                     <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="600 123 456" />
                   </label>
                   <label className="field">
-                    <span>Email <em>(opcional, para enviarte la confirmación)</em></span>
+                    <span>{T.email} <em>{T.optionalConfirmation}</em></span>
                     <input type="email" autoComplete="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
                   </label>
                   <label className="field">
-                    <span>Comentarios <em>(opcional)</em></span>
-                    <textarea rows={3} maxLength={500} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Alergias, diseño que te gusta, retirada de esmalte previo…" />
+                    <span>{T.comments} <em>{T.optional}</em></span>
+                    <textarea rows={3} maxLength={500} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder={T.commentsPh} />
                   </label>
                   {/* honeypot */}
                   <input className="hp" tabIndex={-1} autoComplete="off" aria-hidden="true" name="website" value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} />
+
+                  {kinds.length > 0 && (
+                    <fieldset className="safety">
+                      <legend>{T.safetyTitle}</legend>
+                      {kinds.map((k) => (
+                        <div key={k} className="safety__group">
+                          <h4>{T[`${k}Title` as keyof Dict]}</h4>
+                          {[1, 2, 3].map((i) => (
+                            <label key={i} className="check">
+                              <input type="checkbox" required checked={!!acks[`${k}:${i}`]} onChange={(e) => setAcks({ ...acks, [`${k}:${i}`]: e.target.checked })} />
+                              <span>{T[`${k}${i}` as keyof Dict]}</span>
+                            </label>
+                          ))}
+                        </div>
+                      ))}
+                      <p className="muted small">{allAcked ? T.safetyNote : T.safetyNeed}</p>
+                    </fieldset>
+                  )}
+
                   <label className="check">
                     <input type="checkbox" required checked={form.consent} onChange={(e) => setForm({ ...form, consent: e.target.checked })} />
-                    <span>Acepto que Pro Diva use mis datos para gestionar esta cita y enviarme la confirmación y un recordatorio por WhatsApp, SMS o email.</span>
+                    <span>{T.consentText}</span>
                   </label>
                   {needsDeposit && (
-                    <p className="notice notice--info">
-                      Este servicio lleva una <b>señal de {fmtPrice(totalDeposit)}</b>, que se descuenta del total. Si cancelas con al menos {refundHours} h de antelación te la devolvemos; si no, se retiene. La pagas con tarjeta en el siguiente paso.
-                    </p>
+                    <p className="notice notice--info">{t("depositNote", { amount: money(depositKnown), hours: refundHours })}</p>
                   )}
-                  <button type="submit" className="btn btn--primary btn--lg btn--block" disabled={submitting}>
-                    {submitting ? (needsDeposit ? "Abriendo el pago…" : "Confirmando…") : needsDeposit ? `Pagar señal de ${fmtPrice(totalDeposit)} y confirmar` : apart ? `Confirmar las ${legs.length} citas` : "Confirmar cita"}
+                  {showPolicyNote && <p className="notice notice--info">{T.depositPolicyNote}</p>}
+                  <button type="submit" className="btn btn--primary btn--lg btn--block" disabled={submitting || !allAcked}>
+                    {submitting ? (needsDeposit ? T.openingPay : T.confirming) : needsDeposit ? t("payAndConfirm", { amount: money(depositKnown) }) : apart ? t("confirmMany", { n: legs.length }) : T.confirm}
                   </button>
                 </form>
               </>
@@ -973,7 +1405,7 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
             {step === "done" && done && doneAll.length > 0 && (
               <div className="done">
                 <button type="button" className="back done__back" onClick={back}>
-                  <ArrowLeft size={18} aria-hidden="true" /> Volver al menú
+                  <ArrowLeft size={18} aria-hidden="true" /> {T.backMenu}
                 </button>
                 <PetalBurst />
                 <motion.svg
@@ -999,37 +1431,44 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
                     transition={{ delay: 0.25, duration: 0.5, ease: "easeOut" }}
                   />
                 </motion.svg>
-                <h2 className="panel__title">{doneAll.length > 1 ? "¡Citas confirmadas!" : "¡Cita confirmada!"}</h2>
+                <h2 className="panel__title">{doneAll.length > 1 ? T.doneMany : T.doneOne}</h2>
                 <ul className="donelist">
                   {doneAll.map((d) => (
                     <li key={d.code}>
-                      <p className="done__when">{fmtLong(d.startsAt)}</p>
+                      <p className="done__when">{fmtLong(d.startsAt, locale)}</p>
                       <p className="muted">
                         {d.serviceName}
-                        {multiStaff ? ` con ${d.staffName}` : ""} · {fmtPrice(d.priceCents)}
+                        {multiStaff ? t("withStaff", { name: d.staffName }) : ""} · {money(d.priceCents)}
                       </p>
-                      <p className="done__code">Código <strong>{d.code}</strong></p>
+                      <p className="done__code">{T.code} <strong>{d.code}</strong></p>
                     </li>
                   ))}
                 </ul>
                 <p className="muted">{address}</p>
                 <div className="done__actions">
                   <a className="btn btn--primary" href={icsHref(doneAll, address)} download={`cita-prodiva-${done.code}.ics`}>
-                    <CalendarPlus size={17} aria-hidden="true" /> Añadir al calendario
+                    <CalendarPlus size={17} aria-hidden="true" /> {T.addCalendar}
                   </a>
                   <a
                     className="btn btn--ghost"
-                    href={`https://wa.me/${whatsapp}?text=${encodeURIComponent(`Hola, soy ${form.name}. He reservado ${doneAll.map((d) => `${d.serviceName} el ${fmtLong(d.startsAt)} (código ${d.code})`).join("; ")}.`)}`}
+                    href={`https://wa.me/${whatsapp}?text=${encodeURIComponent(t("waMsg", { name: form.name, list: doneAll.map((d) => t("waItem", { service: d.serviceName, when: fmtLong(d.startsAt, locale), code: d.code })).join("; ") }))}`}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <MessageCircle size={17} aria-hidden="true" /> Avisar por WhatsApp
+                    <MessageCircle size={17} aria-hidden="true" /> {T.whatsapp}
                   </a>
-                  <Link className="btn btn--ghost" href={`/c/${done.code}?t=${done.token}`}>{doneAll.length > 1 ? "Ver, cambiar o cancelar mis citas" : "Ver, cambiar o cancelar mi cita"}</Link>
+                  <Link className="btn btn--ghost" href={`/c/${done.code}?t=${done.token}`}>{doneAll.length > 1 ? T.viewMany : T.viewOne}</Link>
                 </div>
-                <button type="button" className="btn btn--primary btn--lg btn--block" onClick={reset}>Reservar otra cita</button>
-                <Link className="back" href="/"><ArrowLeft size={16} aria-hidden="true" /> Volver al inicio de la web</Link>
-                <p className="muted small">El mismo día te escribiremos para que confirmes con un toque. Guarda el enlace de arriba por si necesitas cancelar.</p>
+                {(() => {
+                  const own = apart ? legs.map((l) => l.service) : [service, ...extras].filter((s): s is Service => !!s);
+                  const rb = own.filter((s) => s.rebookWeeks);
+                  return rb.length ? (
+                    <RebookCard lang={lang} today={today} maxDate={maxDate} baseStartsAt={doneAll[0].startsAt} services={rb} contact={{ name: form.name, phone: form.phone, email: form.email }} acks={[...kinds]} />
+                  ) : null;
+                })()}
+                <button type="button" className="btn btn--primary btn--lg btn--block" onClick={reset}>{T.bookAnother}</button>
+                <Link className="back" href="/"><ArrowLeft size={16} aria-hidden="true" /> {T.backHomeWeb}</Link>
+                <p className="muted small">{T.doneFooter}</p>
               </div>
             )}
           </motion.section>
@@ -1038,54 +1477,73 @@ export default function BookingFlow({ services, staff, initialSlug, initialDay, 
 
       <div className="flow__side">
       {step !== "done" && (
-        <aside className="summary" aria-label="Resumen de tu cita">
-          <h2>Tu cita</h2>
+        <aside className={`summary ${visitServices.length ? "" : "summary--empty"}`} aria-label={T.summaryLabel}>
+          <h2>{T.yourVisit}</h2>
           <dl>
-            <dt>{apart ? "Tus citas" : "Servicio"}</dt>
+            <dt>{apart ? T.yourAppointments : T.service}</dt>
             <dd>
               {apart ? (
                 <ul className="summary__legs">
                   {legs.map((l) => (
-                    <li key={l.service.id}><span>{l.service.name}</span><em>{l.hold ? fmtLong(l.hold.startsAt) : "sin hora"}</em></li>
+                    <li key={l.service.id}><span>{L(l.service).name}</span><em>{l.hold ? fmtLong(l.hold.startsAt, locale) : T.noTime}</em></li>
                   ))}
                 </ul>
-              ) : visitServices.length ? visitServices.map((x) => x.name).join(" + ") : "Sin elegir"}
+              ) : visitServices.length ? (
+                names(visitServices)
+              ) : (
+                T.unset
+              )}
             </dd>
+            {addonObjs.length > 0 && (
+              <>
+                <dt>{T.extrasTitle}</dt>
+                <dd>{addonObjs.map((a) => L(a).name).join(" + ")}</dd>
+              </>
+            )}
             {service && (
               <>
-                <dt>Duración y precio</dt>
-                <dd>{fmtDuration(totalDuration)} · {fmtPrice(totalPrice)}</dd>
+                <dt>{T.durationPrice}</dt>
+                <dd>{fmtDuration(totalDuration)} · {money(totalPrice)}</dd>
+              </>
+            )}
+            {matchedPack && packSaving > 0 && (
+              <>
+                <dt>{matchedPack.emoji} {t("packBadge", { name: L(matchedPack).name })}</dt>
+                <dd>{t("packSaved", { amount: money(packSaving) })}</dd>
               </>
             )}
             {needsDeposit && (
               <>
-                <dt>Señal</dt>
-                <dd>{fmtPrice(totalDeposit)} (se descuenta del total)</dd>
+                <dt>{T.deposit}</dt>
+                <dd>{t("depositSummary", { amount: money(depositKnown) })}</dd>
               </>
             )}
             {multiStaff && (
               <>
-                <dt>Profesional</dt>
-                <dd>{staffName ?? (step === "service" || step === "staff" ? "Sin elegir" : "La primera libre")}</dd>
+                <dt>{T.professional}</dt>
+                <dd>{staffName ?? (step === "service" || step === "staff" ? T.unset : T.firstAvailable)}</dd>
               </>
             )}
             {!apart && (
               <>
-                <dt>Fecha y hora</dt>
-                <dd>{hold ? fmtLong(hold.startsAt) : "Sin elegir"}</dd>
+                <dt>{T.dateTime}</dt>
+                <dd>{hold ? fmtLong(hold.startsAt, locale) : T.unset}</dd>
               </>
             )}
           </dl>
-          {allHolds.length > 0 && step !== "details" && <p className="summary__hold"><Lock size={13} aria-hidden="true" /> Bloqueado {mmss}</p>}
+          {allHolds.length > 0 && step !== "details" && <p className="summary__hold"><Lock size={13} aria-hidden="true" /> {t("locked", { t: mmss })}</p>}
         </aside>
       )}
       <BookingAvatar
         state={avatarState}
+        lang={lang}
         trends={trends}
-        services={services}
+        services={services.map((s) => ({ slug: s.slug, name: L(s).name, category: localCategory(s.category, lang), durationMin: s.durationMin, priceCents: s.priceCents }))}
+        packs={packs.map((p) => ({ slug: p.slug, name: L(p).name, serviceSlugs: p.serviceSlugs, discountPercent: p.discountPercent }))}
         selected={visitServices.map((x) => x.slug)}
         step={step}
         address={address}
+        history={history.length > 0}
         onAdd={addFromAvatar}
       />
       </div>

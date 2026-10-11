@@ -530,6 +530,113 @@ try {
       }
     }
 
+    /* 3f ------------------------------------------------------------- */
+    section("3f. Reserva completa: extras, pack con descuento, servicio repetido, casillas de seguridad y tope de citas");
+    {
+      const all = (await db.query(`SELECT id, slug, name, category, duration_min, price_cents FROM services WHERE active ORDER BY sort, id`)).rows;
+      const bySlug = Object.fromEntries(all.map((r) => [r.slug, r]));
+      const firstFree = async (ids, fromOffset = 3) => {
+        const sl = (await api(`/api/availability?serviceIds=${ids.join(",")}&from=${addDays(from, fromOffset)}&to=${addDays(from, fromOffset + 12)}`)).json?.slots ?? [];
+        return sl.find((x) => x.available);
+      };
+      const release = (r) => api(`/api/holds/${r.json?.holdId}?token=${r.json?.holdToken}`, { method: "DELETE" });
+
+      // 1) extras: suman duración y precio, se guardan como fila de la cita y se pueden pedir como disponibilidad
+      const addon = (await db.query(`SELECT id, duration_min, price_cents, category FROM addons WHERE active ORDER BY sort, id LIMIT 1`)).rows[0];
+      if (!addon) check(false, "hay al menos un extra activo para probar");
+      else {
+        const base = (await db.query(`SELECT id, duration_min, price_cents FROM services WHERE active AND ($1::text IS NULL OR category = $1) ORDER BY duration_min LIMIT 1`, [addon.category])).rows[0];
+        const sl = await firstFree([base.id]);
+        const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [base.id], addonIds: [addon.id], staffId: null, startsAt: sl.startsAt } });
+        check(h.status === 200 && h.json?.durationMin === base.duration_min + addon.duration_min && h.json?.priceCents === base.price_cents + addon.price_cents, "el extra suma su duración y su precio al bloqueo", JSON.stringify(h.json));
+        const rows = (await db.query(`SELECT is_addon, service_id FROM booking_services WHERE booking_id = $1 ORDER BY position`, [h.json?.holdId])).rows;
+        check(rows.length === 2 && rows[1].is_addon === true && rows[1].service_id === null, "el extra queda guardado como una fila de la cita (sin servicio asociado)");
+        const n0 = ((await api(`/api/availability?serviceIds=${base.id}&from=${addDays(from, 3)}&to=${addDays(from, 9)}`)).json?.slots ?? []).filter((x) => x.available).length;
+        const n1 = ((await api(`/api/availability?serviceIds=${base.id}&addonIds=${addon.id}&from=${addDays(from, 3)}&to=${addDays(from, 9)}`)).json?.slots ?? []).filter((x) => x.available).length;
+        check(n1 <= n0, "con el extra (más tiempo) no salen más huecos que sin él", `${n1} ≤ ${n0}`);
+        await release(h);
+        const other = (await db.query(`SELECT a.id AS aid, s.id AS sid FROM addons a, services s WHERE a.category IS NOT NULL AND s.active AND s.category <> a.category AND a.active LIMIT 1`)).rows[0];
+        if (other) {
+          const bad = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [other.sid], addonIds: [other.aid], staffId: null, startsAt: sl.startsAt } });
+          check(bad.status === 400, "un extra no se puede añadir a un servicio de otra categoría", String(bad.status));
+        }
+      }
+
+      // 2) el mismo servicio dos veces (manicura para ti y para tu acompañante)
+      const A2 = all[0];
+      const sl2 = await firstFree([A2.id, A2.id]);
+      if (sl2) {
+        const h2 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A2.id, A2.id], staffId: null, startsAt: sl2.startsAt } });
+        check(h2.status === 200 && h2.json?.durationMin === 2 * A2.duration_min, "el mismo servicio puede ir dos veces en una visita (acompañante)", JSON.stringify(h2.json));
+        await release(h2);
+      }
+
+      // 3) pack: el descuento solo se aplica si los servicios son exactamente los del pack
+      const pack = (await db.query(`SELECT slug, service_slugs, discount_percent FROM packages WHERE active ORDER BY sort LIMIT 1`)).rows[0];
+      if (pack && pack.service_slugs.every((x) => bySlug[x])) {
+        await db.query(`UPDATE packages SET discount_percent = 20 WHERE slug = $1`, [pack.slug]);
+        try {
+          const ids = pack.service_slugs.map((x) => bySlug[x].id);
+          const full = pack.service_slugs.reduce((a, x) => a + bySlug[x].price_cents, 0);
+          const disc = pack.service_slugs.reduce((a, x) => a + Math.round(bySlug[x].price_cents * 0.8), 0);
+          const slp = await firstFree(ids);
+          if (slp) {
+            const withPack = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, packageSlug: pack.slug, staffId: null, startsAt: slp.startsAt } });
+            check(withPack.status === 200 && withPack.json?.priceCents === disc, "con el pack se aplica el 20 % a los servicios", `${withPack.json?.priceCents} vs ${disc}`);
+            const rowsP = (await db.query(`SELECT p.package_slug, (SELECT SUM(price_cents)::int FROM booking_services WHERE booking_id = p.id) AS total FROM bookings p WHERE id = $1`, [withPack.json?.holdId])).rows[0];
+            check(rowsP?.package_slug === pack.slug && rowsP?.total === disc, "el precio con descuento queda guardado en la cita", JSON.stringify(rowsP));
+            await release(withPack);
+            const noPack = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: ids, staffId: null, startsAt: slp.startsAt } });
+            check(noPack.status === 200 && noPack.json?.priceCents === full, "sin pedir el pack no hay descuento", `${noPack.json?.priceCents} vs ${full}`);
+            await release(noPack);
+            const extraSvc = all.find((x) => !ids.includes(x.id));
+            const slx = await firstFree([...ids, extraSvc.id]);
+            if (slx) {
+              const broken = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [...ids, extraSvc.id], packageSlug: pack.slug, staffId: null, startsAt: slx.startsAt } });
+              check(broken.status === 200 && broken.json?.priceCents === full + extraSvc.price_cents, "si los servicios ya no son exactamente los del pack, no hay descuento", `${broken.json?.priceCents}`);
+              await release(broken);
+            }
+          }
+        } finally {
+          await db.query(`UPDATE packages SET discount_percent = $2 WHERE slug = $1`, [pack.slug, pack.discount_percent]);
+        }
+      } else check(true, "(sin packs activos con servicios existentes: se omite la prueba del descuento)");
+
+      // 4) casillas de seguridad: sin marcarlas no se confirma; marcadas, solo se guarda que las marcó
+      const mb = (await db.query(`SELECT id, slug FROM services WHERE active AND consent_kind IS NOT NULL ORDER BY id LIMIT 1`)).rows[0];
+      if (mb) {
+        const kind = (await db.query(`SELECT consent_kind FROM services WHERE id = $1`, [mb.id])).rows[0].consent_kind;
+        const slm = await firstFree([mb.id], 5);
+        if (slm) {
+          const hm = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [mb.id], staffId: null, startsAt: slm.startsAt } });
+          const noAck = await api("/api/bookings", { method: "POST", body: { holdId: hm.json?.holdId, holdToken: hm.json?.holdToken, name: "E2E Test", phone: "600000008" } });
+          check(noAck.status === 400, "sin marcar las casillas de seguridad no se confirma el tratamiento", String(noAck.status));
+          const ack = await api("/api/bookings", { method: "POST", body: { holdId: hm.json?.holdId, holdToken: hm.json?.holdToken, name: "E2E Test", phone: "600000008", acks: [kind] } });
+          const saved = (await db.query(`SELECT consent_acks, consent_at FROM bookings WHERE id = $1`, [hm.json?.holdId])).rows[0];
+          check((ack.status === 200 || ack.json?.checkoutUrl) && saved?.consent_acks?.[0] === kind && !!saved?.consent_at, "marcadas las casillas, se guarda solo que las marcó (y cuándo)", JSON.stringify(saved));
+          if (ack.json?.booking) await api("/api/respond", { method: "POST", body: { code: ack.json.booking.code, token: ack.json.booking.token, action: "cancel" } });
+        }
+      }
+
+      // 5) tope de citas futuras por teléfono
+      const MAXA = Number(process.env.MAX_ACTIVE_BOOKINGS ?? 6);
+      const staff1 = (await db.query(`SELECT id FROM staff WHERE active ORDER BY sort, id LIMIT 1`)).rows[0].id;
+      for (let i = 0; i < MAXA; i++) {
+        await db.query(
+          `INSERT INTO bookings (code, staff_id, service_id, starts_at, ends_at, status, hold_token, customer_name, customer_phone, confirmed_at)
+           VALUES ($1, $2, $3, now() + make_interval(days => $4::int), now() + make_interval(days => $4::int, mins => 30), 'CONFIRMED', 'e2e', 'E2E Test', '600000009', now())`,
+          [`E2EL${i}${Date.now() % 100000}`, staff1, A2.id, 40 + i],
+        );
+      }
+      const slL = await firstFree([A2.id], 3);
+      if (slL) {
+        const hl = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A2.id], staffId: null, startsAt: slL.startsAt } });
+        const cl = await api("/api/bookings", { method: "POST", body: { holdId: hl.json?.holdId, holdToken: hl.json?.holdToken, name: "E2E Test", phone: "600000009" } });
+        check(cl.status === 429 && cl.json?.error?.code === "LIMIT", `con ${MAXA} citas pendientes no se puede reservar otra (llamar al salón)`, JSON.stringify(cl.json?.error ?? cl.status));
+        await release(hl);
+      }
+    }
+
     /* 4 -------------------------------------------------------------- */
     section("4. Carrera: seis personas pulsan el mismo hueco a la vez");
     const target = free[1];
@@ -546,7 +653,7 @@ try {
 } finally {
   await db.query(`DELETE FROM bookings WHERE customer_name = 'E2E Test'`);
   await db.query(`DELETE FROM waitlist WHERE name = 'E2E Test'`);
-  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007')`);
+  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007','600000008','600000009')`);
   await db.end();
 }
 

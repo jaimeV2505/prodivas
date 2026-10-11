@@ -3,8 +3,8 @@ import { z } from "zod";
 import { CONFIG } from "@/lib/config";
 import { addDays, isDay, todayIn } from "@/lib/dates";
 import { getCapacity, getSlotRows, groupSlots } from "@/lib/availability";
-import { BookingError, getBookingByCode } from "@/lib/bookings";
-import { query } from "@/lib/db";
+import { BookingError, bookingVisitMetrics, getBookingByCode } from "@/lib/bookings";
+import { query, run } from "@/lib/db";
 import { loadVisit } from "@/lib/visit";
 import { respond } from "@/lib/http";
 
@@ -14,7 +14,11 @@ const Params = z.object({
   serviceId: z.coerce.number().int().positive().optional(),
   serviceIds: z
     .string()
-    .regex(/^\d+(,\d+){0,3}$/, "Servicios no válidos")
+    .regex(/^\d+(,\d+){0,5}$/, "Servicios no válidos")
+    .optional(),
+  addonIds: z
+    .string()
+    .regex(/^\d+(,\d+){0,5}$/, "Extras no válidos")
     .optional(),
   exclude: z.string().max(16).optional(), // código de una cita (para ofrecer también su propio hueco)
   t: z.string().max(80).optional(), // token de esa cita
@@ -30,11 +34,17 @@ export async function GET(req: NextRequest) {
     const p = Params.parse(Object.fromEntries(req.nextUrl.searchParams));
     const ids = p.serviceIds ? p.serviceIds.split(",").map(Number) : p.serviceId ? [p.serviceId] : [];
     if (!ids.length) throw new BookingError("INVALID", "Falta el servicio.", 400);
-    const visit = await loadVisit(ids);
+    const addonIds = p.addonIds ? p.addonIds.split(",").map(Number) : [];
+    const visit = await loadVisit(ids, run, addonIds);
     let excludeBookingId: string | null = null;
+    let metrics = { duration: visit.durationMin, buffer: visit.bufferMin, step: visit.stepMin };
     if (p.exclude && p.t) {
       const bk = await getBookingByCode(p.exclude.toUpperCase(), p.t);
-      if (bk && bk.status === "CONFIRMED") excludeBookingId = bk.id;
+      if (bk && bk.status === "CONFIRMED") {
+        excludeBookingId = bk.id;
+        // al cambiar la hora de una cita, la duración sale de la propia cita (incluye sus extras)
+        metrics = await bookingVisitMetrics(run, bk.id, visit.durationMin);
+      }
     } else if (p.holdId && p.holdToken) {
       // Así los huecos que se solapan con su propia selección siguen disponibles para moverla (no parecen «ocupados»)
       const own = await query<{ id: string }>(
@@ -54,13 +64,13 @@ export async function GET(req: NextRequest) {
       getSlotRows({
         from,
         to,
-        durationMin: visit.durationMin,
-        bufferMin: visit.bufferMin,
-        stepMin: visit.stepMin,
+        durationMin: metrics.duration,
+        bufferMin: metrics.buffer,
+        stepMin: metrics.step,
         staffId: p.staffId ?? null,
         excludeBookingId,
       }),
-      getCapacity({ from, to, durationMin: visit.durationMin, bufferMin: visit.bufferMin, staffId: p.staffId ?? null }),
+      getCapacity({ from, to, durationMin: metrics.duration, bufferMin: metrics.buffer, staffId: p.staffId ?? null }),
     ]);
     return { slots: groupSlots(rows), capacity };
   });
