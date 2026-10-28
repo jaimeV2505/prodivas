@@ -25,6 +25,7 @@ export default async function EasyPage({
         today={todayIn(CONFIG.tz)}
         address={CONFIG.salon.address}
         mapsUrl={mapsUrl}
+        whatsapp={CONFIG.salon.whatsapp}
         depositEnabled={stripeEnabled()}
         depositPolicy={depositPolicy}
         refundHours={DEPOSIT_REFUND_HOURS}

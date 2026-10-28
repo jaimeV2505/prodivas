@@ -313,6 +313,14 @@ export async function notifyReactivation(p: { name: string; phone: string; email
 async function toOwner(b: BookingSummary | null, kind: string, html: string, subject: string): Promise<void> {
   const jobs: Promise<unknown>[] = [];
   if (enabled.telegram()) jobs.push(run(b?.id ?? null, kind, "telegram", () => sendTelegram(html)));
+  // SMS a la dueña: si lo activas (OWNER_SMS=on) o si no hay Telegram ni email para avisarla (así siempre le llega algo)
+  const phone = process.env.OWNER_PHONE || CONFIG.salon.phoneE164;
+  const noOtherChannel = !enabled.telegram() && !(process.env.OWNER_EMAIL && enabled.email());
+  if (process.env.OWNER_SMS === "on" || noOtherChannel) {
+    const text = gsm(html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 300));
+    if (enabled.sms()) jobs.push(run(b?.id ?? null, kind, "sms", () => sendSms(phone, text)));
+    else if (devMode()) jobs.push(run(b?.id ?? null, kind, "dev", async () => ({ ok: true, detail: `→ dueña ${phone}: ${text}` })));
+  }
   const owner = process.env.OWNER_EMAIL;
   if (owner && enabled.email()) {
     jobs.push(run(b?.id ?? null, kind, "email", () => sendEmail([owner], subject, `<div style="font-family:system-ui,sans-serif;white-space:pre-line">${html.replace(/<\/?b>/g, "").replace(/<\/?i>/g, "")}</div>`)));

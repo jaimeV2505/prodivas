@@ -1,7 +1,7 @@
 name: Recordatorios
 # Llama cada ~10 minutos al ciclo de recordatorios, avisos, recuperación de reservas y limpieza.
-# Necesita los secretos CRON_SECRET (el mismo valor que en Vercel) y SITE_URL (https://tu-dominio).
-# Mientras no estén creados, el trabajo se salta (no falla).
+# Secretos del repositorio: CRON_SECRET (el MISMO valor que la variable CRON_SECRET de Vercel) y SITE_URL.
+# Mientras falten, o mientras Vercel aún no tenga el mismo CRON_SECRET, el trabajo avisa y no falla.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -16,9 +16,15 @@ jobs:
       - name: Llamar al cron
         if: env.HAS_SECRETS == 'true'
         run: |
-          curl --fail --silent --show-error --max-time 60 -X POST \
+          code=$(curl --silent --show-error --max-time 60 -o out.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            "${{ secrets.SITE_URL }}/api/cron/reminders"
+            "${{ secrets.SITE_URL }}/api/cron/reminders")
+          cat out.json; echo
+          if [ "$code" = "401" ]; then
+            echo "::warning::401: la variable CRON_SECRET de Vercel no coincide con el secreto de GitHub (o falta en Vercel). Súbela con scripts/vercel-env.sh."
+          elif [ "$code" != "200" ]; then
+            echo "::error::El cron respondió $code"; exit 1
+          fi
       - name: Faltan los secretos
         if: env.HAS_SECRETS != 'true'
-        run: echo "Crea los secretos CRON_SECRET y SITE_URL en Settings > Secrets and variables > Actions para activar los recordatorios."
+        run: echo "::warning::Crea los secretos CRON_SECRET y SITE_URL en Settings > Secrets and variables > Actions."

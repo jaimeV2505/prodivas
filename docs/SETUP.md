@@ -17,8 +17,8 @@ Número de pruebas usado en esta guía: **+46 79 325 06 92** (ya viene escrito e
 | `SESSION_SECRET` | `openssl rand -hex 32` |
 | `CRON_SECRET` | `openssl rand -hex 32` |
 | `NEXT_PUBLIC_SITE_URL` | `https://prodivas.vercel.app` (o tu dominio) |
-| `WHATSAPP_NUMBER` | `34670424348` (teléfono del salón, para los enlaces wa.me) |
-| `NOTIFY_TEST_PHONE` | `+46793250692` |
+| `SALON_PHONE` / `NEXT_PUBLIC_SALON_PHONE` | `+34 623 27 79 86` (teléfono de contacto: mensajes, enlaces wa.me y avisos de la dueña por SMS) |
+| `NOTIFY_TEST_PHONE` | `+34623277986` |
 
 Atajo: copia `.env.example` a `.env.production`, rellénalo y ejecuta `./scripts/vercel-env.sh`.
 
@@ -29,15 +29,15 @@ Atajo: copia `.env.example` a `.env.production`, rellénalo y ejecuta `./scripts
 4. Redeploy → Ajustes → **Probar Telegram**.
 
 ## 2. Recordatorios automáticos (GitHub) · 5 min · gratis
-1. GitHub → repo → Settings → Secrets and variables → Actions: crea `CRON_SECRET` (el mismo de Vercel) y `SITE_URL` (`https://prodivas.vercel.app`).
-2. Pestaña **Actions → Recordatorios → Run workflow**. Debe responder `{"ok":true,...}`.
-3. En Ajustes aparecerá «Último ciclo de recordatorios: hace X min».
-
-> 💡 El workflow `.github/workflows/reminders.yml` ya viene en el proyecto: solo faltan los dos secretos. Sin él no salen recordatorios, ni recuperación de reservas, ni «vino» automático.
+El workflow `.github/workflows/reminders.yml` llama cada ~10 min a `/api/cron/reminders` (recordatorios, recuperación de reservas, «vino» automático, limpieza…).
+1. En GitHub → Settings → Secrets and variables → Actions deben existir `SITE_URL` (`https://prodivas.vercel.app`) y `CRON_SECRET`.
+2. **El mismo valor de `CRON_SECRET` tiene que estar también en Vercel** (Settings → Environment Variables → Production). Atajo: `npx vercel login && npx vercel link` y `./scripts/vercel-env.sh .env.vercel` (el archivo `.env.vercel` lo genera el asistente y no se sube a git). Después, un *Redeploy*.
+3. Pestaña **Actions → Recordatorios → Run workflow**. Debe responder `{"ok":true,...}`; si ves un aviso 401, el valor de Vercel no coincide.
+4. En Ajustes aparecerá «Último ciclo de recordatorios: hace X min».
 
 ## 3. SMS con Twilio · 15 min · de pago por mensaje
 1. Crea la cuenta en twilio.com. `TWILIO_ACCOUNT_SID` y `TWILIO_AUTH_TOKEN` están en la consola.
-2. **Cuenta de prueba:** solo envía a números verificados → Phone Numbers → *Verified Caller IDs* → añade **+46793250692**.
+2. **Cuenta de prueba:** solo envía a números verificados → Phone Numbers → *Verified Caller IDs* → añade **+34 623 27 79 86**.
 3. Remitente: en España puedes usar un nombre (`TWILIO_FROM=ProDiva`) o comprar un número. Comprueba en Twilio las reglas de remitente para España.
 4. Para clientas reales hace falta **actualizar la cuenta** (quitar el modo prueba).
 5. Redeploy → Ajustes → pon el teléfono → **Probar SMS**.
@@ -50,7 +50,7 @@ Atajo: copia `.env.example` a `.env.production`, rellénalo y ejecuta `./scripts
 ## 5. WhatsApp Business (Meta) · de 1 a varios días
 1. developers.facebook.com → crea una app *Business* → añade el producto **WhatsApp**.
 2. **API Setup:** copia `Phone number ID` → `WHATSAPP_PHONE_NUMBER_ID` y genera un token **permanente** (usuario del sistema) → `WHATSAPP_TOKEN`.
-3. **Destinatarios de prueba:** añade **+46793250692** (te llegará un código por WhatsApp).
+3. **Destinatarios de prueba:** añade **+34 623 27 79 86** (te llegará un código por WhatsApp).
 4. Ajustes → **Probar WhatsApp** (usa la plantilla de ejemplo `hello_world`).
 5. En *WhatsApp Manager → Plantillas*, crea (categoría **Utilidad**, idioma **Español**): `cita_confirmada`, `recordatorio_cita` y `hueco_libre`. Los textos exactos están en el README. La aprobación puede tardar.
 6. **Webhook** (para los botones Confirmar/Cancelar y saber si el mensaje llegó): Callback URL `https://TU-DOMINIO/api/whatsapp/webhook`, verify token = el valor de `WHATSAPP_VERIFY_TOKEN` (invéntalo), suscríbete al campo **messages**. `WHATSAPP_APP_SECRET` = *App Secret* de la app (Settings → Basic).

@@ -554,7 +554,11 @@ export async function createHold(input: {
         extendedIds: kept,
       };
     } catch (e) {
-      if (isExclusionViolation(e)) throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de ocuparse. Elige otro.", 409);
+      if (isExclusionViolation(e)) {
+        const x = e as { constraint?: string; detail?: string };
+        console.warn("[hold] choque con otra cita:", x.constraint, x.detail);
+        throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de ocuparse. Elige otro.", 409);
+      }
       throw e;
     }
   });

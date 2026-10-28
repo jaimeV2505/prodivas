@@ -24,7 +24,9 @@ const PH = [1, 2, 3, 4, 5, 6, 7].map(phoneOf);
 
 try {
   const svc = (await db.query(`SELECT id, slug FROM services WHERE active ORDER BY sort, id LIMIT 1`)).rows[0];
-  const slots = await freeSlots(svc.id, 6, 20);
+  const all = await freeSlots(svc.id, 6, 20);
+  // huecos separados al menos 3 h para que las reservas de la prueba no se pisen entre sí
+  const slots = all.filter((s, i) => { const prev = all.slice(0, i).filter((x) => x.__keep).pop(); if (!prev || new Date(s.startsAt) - new Date(prev.startsAt) >= 3 * 3600e3) { s.__keep = true; return true; } return false; });
   const myIp = ip(2);
 
   console.log("\n1. Verificación del teléfono");
@@ -87,7 +89,7 @@ try {
   const hf = await hold(svc.id, slots[2], ip(6));
   const cf = await api("/api/bookings", { body: { holdId: hf.holdId, holdToken: hf.holdToken, name: "Growth Friend", phone: friend, attr: { sid: `gt_${run}_f`, ref: code2, flow: "full" } }, ip: ip(6) });
   await new Promise((r) => setTimeout(r, 1200));
-  check(cf.status === 200 && (await db.query(`SELECT 1 FROM customers WHERE phone_key = $1 AND referred_by IS NOT NULL`, [friend.slice(-9)])).rowCount === 1, "la amiga queda anotada como «traída por»", JSON.stringify(cf.json?.error));
+  check(cf.status === 200 && (await db.query(`SELECT 1 FROM customers WHERE phone_key = $1 AND referred_by IS NOT NULL`, [friend.slice(-9)])).rowCount === 1, "la amiga queda anotada como «traída por»", JSON.stringify(cf.json?.error) + " hold=" + JSON.stringify(hf.error ?? hf.holdId));
   await db.query(`UPDATE bookings SET starts_at = now() - interval '6 hours', ends_at = now() - interval '5 hours', blocked_until = now() - interval '5 hours' WHERE code = $1`, [cf.json?.booking?.code]);
   await cron();
   const pair = (await db.query(`SELECT phone_key, referral_rewards, visit_count FROM customers WHERE phone_key IN ($1, $2)`, [friend.slice(-9), PH[0].slice(-9)])).rows;

@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { answer, nextTrend, quickChips, spontaneous, type DivaAction, type DivaCtx, type DivaMsg, type Rot } from "@/lib/diva";
+import { answer, contextChips, nextTrend, spontaneous, type DivaAction, type DivaCtx, type DivaInfo, type DivaMsg, type Rot } from "@/lib/diva";
+import { CONFIG } from "@/lib/config";
+import { todayIn } from "@/lib/dates";
 import { fill, getDict } from "@/lib/i18n";
 import type { Trend } from "@/lib/trends";
+import DivaChat, { loadDivaInfo } from "./DivaChat";
 
 /**
  * Diva, la chica que reserva contigo. Reacciona al paso en el que vas, habla sola de vez en cuando
@@ -13,7 +16,7 @@ import type { Trend } from "@/lib/trends";
  */
 export type AvatarState = "browse" | "held" | "typing" | "done";
 type Result = "added" | "chosen" | "already" | "full" | "missing";
-type Line = { from: "you" | "diva"; text: string; action?: DivaAction; used?: boolean };
+type Line = { from: "you" | "diva"; text: string; action?: DivaAction; used?: boolean; links?: { label: string; href: string }[] };
 
 type Props = {
   state: AvatarState;
@@ -41,13 +44,23 @@ export default function BookingAvatar({ state, trends, services, packs, selected
   const [cheer, setCheer] = useState(false);
   const [text, setText] = useState("");
   const rot = useRef<Rot>({});
+  const [chatOpen, setChatOpen] = useState(false);
+  const [question, setQuestion] = useState<{ text: string; nonce: number } | undefined>();
+  const [info, setInfo] = useState<DivaInfo>({});
   const spoken = useRef(0);
   const lastTouch = useRef(Date.now());
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   // El contexto cambia a cada paso: se lee siempre el último desde una referencia
   const ctxRef = useRef<DivaCtx>({ trends, services, packs, selected, step, address });
-  ctxRef.current = { trends, services, packs, selected, step, address };
+  ctxRef.current = { trends, services, packs, selected, step, address, today: todayIn(CONFIG.tz), info };
+  useEffect(() => {
+    let off = false;
+    void loadDivaInfo().then((i) => !off && setInfo(i));
+    return () => {
+      off = true;
+    };
+  }, []);
 
   const later = (fn: () => void, ms: number) => {
     const t = setTimeout(fn, ms);
@@ -56,7 +69,7 @@ export default function BookingAvatar({ state, trends, services, packs, selected
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   const say = (m: DivaMsg) => {
-    setLog((l) => [...l, { from: "diva" as const, text: m.text, action: m.action }].slice(-8));
+    setLog((l) => [...l, { from: "diva" as const, text: m.text, action: m.action, links: m.links }].slice(-8));
     setTalking(true);
     later(() => setTalking(false), Math.min(2600, 700 + m.text.length * 22));
   };
@@ -108,7 +121,7 @@ export default function BookingAvatar({ state, trends, services, packs, selected
   }, [state]);
 
   function ask(q: string) {
-    const t = q.trim().slice(0, 120);
+    const t = q.trim().slice(0, 200);
     if (!t || thinking) return;
     lastTouch.current = Date.now();
     spoken.current = 0;
@@ -116,7 +129,15 @@ export default function BookingAvatar({ state, trends, services, packs, selected
     setThinking(true);
     later(() => {
       setThinking(false);
-      say(answer(t, ctxRef.current, rot.current));
+      const r = answer(t, ctxRef.current, rot.current);
+      if (r.ask) {
+        // los huecos reales se ven en el chat completo
+        say({ text: "Te los miro ahora mismo en el chat, con huecos reales 📅" });
+        setQuestion({ text: t, nonce: Date.now() });
+        setChatOpen(true);
+        return;
+      }
+      say(r);
     }, 520);
   }
   function onSubmit(e: FormEvent) {
@@ -164,6 +185,11 @@ export default function BookingAvatar({ state, trends, services, packs, selected
             {diva.text}
           </p>
         )}
+        {!thinking && diva.links?.map((l) => (
+          <a key={l.href} className="avatar__act" href={l.href} {...(l.href.startsWith("http") ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
+            {l.label}
+          </a>
+        ))}
         {!thinking && diva.action && !diva.used && (
           <button type="button" className="avatar__act" onClick={() => act(lastDivaIdx)}>
             + {diva.action.label}
@@ -177,7 +203,7 @@ export default function BookingAvatar({ state, trends, services, packs, selected
 
       <div className="avatar__ask">
         <div className="avatar__chips">
-          {quickChips().map((c) => (
+          {contextChips(step, selected.length, state === "done").slice(0, 4).map((c) => (
             <button key={c.label} type="button" className="avatar__chip" onClick={() => ask(c.q)} disabled={thinking}>
               {c.label}
             </button>
@@ -185,10 +211,28 @@ export default function BookingAvatar({ state, trends, services, packs, selected
         </div>
         <form className="avatar__form" onSubmit={onSubmit}>
           <label className="sr-only" htmlFor="diva-q">{T.divaAsk}</label>
-          <input id="diva-q" value={text} onChange={(e) => setText(e.target.value)} maxLength={120} placeholder={T.divaPlaceholder} autoComplete="off" enterKeyHint="send" />
+          <input id="diva-q" value={text} onChange={(e) => setText(e.target.value)} maxLength={200} placeholder={T.divaPlaceholder} autoComplete="off" enterKeyHint="send" />
           <button type="submit" className="avatar__send" disabled={!text.trim() || thinking}>{T.divaSend}</button>
         </form>
+        <button type="button" className="avatar__chatbtn" onClick={() => setChatOpen(true)}>
+          ✨ Pregúntale a Diva · chat con huecos reales
+        </button>
       </div>
+      <DivaChat
+        flow="full"
+        hideFab
+        open={chatOpen}
+        onOpenChange={setChatOpen}
+        services={services}
+        packs={packs}
+        trends={trends}
+        chosenSlugs={selected}
+        step={step}
+        initialQuestion={question}
+        onChoose={(slugs) => {
+          for (const slug of slugs) onAdd(slug, "service");
+        }}
+      />
     </section>
   );
 }

@@ -177,7 +177,7 @@ ALTER TABLE bookings ALTER COLUMN blocked_until SET NOT NULL;
 
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bookings_no_overlap_v2') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('bookings_no_overlap_v2', 'bookings_no_overlap_v3')) THEN
     ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_no_overlap;
     ALTER TABLE bookings ADD CONSTRAINT bookings_no_overlap_v2 EXCLUDE USING gist (
       staff_id WITH =,
@@ -673,3 +673,6 @@ FROM (
   ) t ORDER BY customer_id, n DESC, last DESC
 ) x
 WHERE c.id = x.customer_id AND c.preferred_staff_id IS NULL;
+
+-- El candado «v2» (toda la cita de una profesional) quedó sustituido por «v3» + bloques: se asegura de que ninguna migración antigua lo recree
+ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_no_overlap_v2;

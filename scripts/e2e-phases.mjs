@@ -53,6 +53,10 @@ try {
   }
   check(!!T, "hay un día con huecos para un tinte de 1 h 45 (incluye 45 min de pose)");
 
+  section("0. El esquema");
+  const oldLock = (await db.query(`SELECT 1 FROM pg_constraint WHERE conname = 'bookings_no_overlap_v2'`)).rowCount;
+  check(oldLock === 0, "el candado antiguo (toda la cita) no existe: lo sustituyen los bloques", String(oldLock));
+
   section("1. La profesional queda libre durante la pose");
   const A = await book(tinte, T, staff1);
   check(A.confirm?.status === 200, "se reserva el tinte A", JSON.stringify(A.confirm?.json?.error ?? A.hold?.json?.error));
@@ -64,7 +68,8 @@ try {
   check((await sl(mins(T, 75)))?.available === false, "ni cuando A vuelve a actuar para aclarar");
   check((await sl(mins(T, 105)))?.available === true, "y sí en cuanto A termina");
   const Bt = await book(tinte, mins(T, 30), staff1);
-  check(Bt.confirm?.status === 200, "un segundo tinte B entra en la pose de A (sus tramos encajan entre los de A)", JSON.stringify(Bt.confirm?.json?.error ?? Bt.hold?.json?.error));
+  const rowB = (await slotsOf(tinte, D, staff1)).find((x) => x.startsAt === mins(T, 30));
+  check(Bt.confirm?.status === 200, "un segundo tinte B entra en la pose de A (sus tramos encajan entre los de A)", JSON.stringify(Bt.confirm?.json?.error ?? Bt.hold?.json?.error) + ` D=${D} T=${T} fila=${JSON.stringify(rowB)}`);
   const Ct = await api("/api/holds", { body: { serviceId: tinte, startsAt: mins(T, 15), staffId: staff1 } });
   check(Ct.status === 409 && Ct.json?.error?.code === "SLOT_TAKEN", "un tinte C que pisaría los tramos de A o B se rechaza", String(Ct.status));
 
