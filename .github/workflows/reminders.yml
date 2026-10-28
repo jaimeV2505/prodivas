@@ -1,6 +1,7 @@
 name: Recordatorios
 # Llama cada ~10 minutos al ciclo de recordatorios, avisos, recuperación de reservas y limpieza.
-# Necesita los secretos CRON_SECRET (el mismo de Vercel) y SITE_URL (https://tu-dominio).
+# Necesita los secretos CRON_SECRET (el mismo valor que en Vercel) y SITE_URL (https://tu-dominio).
+# Mientras no estén creados, el trabajo se salta (no falla).
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -9,9 +10,15 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      HAS_SECRETS: ${{ secrets.CRON_SECRET != '' && secrets.SITE_URL != '' }}
     steps:
       - name: Llamar al cron
+        if: env.HAS_SECRETS == 'true'
         run: |
           curl --fail --silent --show-error --max-time 60 -X POST \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "${{ secrets.SITE_URL }}/api/cron/reminders"
+      - name: Faltan los secretos
+        if: env.HAS_SECRETS != 'true'
+        run: echo "Crea los secretos CRON_SECRET y SITE_URL en Settings > Secrets and variables > Actions para activar los recordatorios."
