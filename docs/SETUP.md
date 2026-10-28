@@ -22,11 +22,12 @@ Número de pruebas usado en esta guía: **+46 79 325 06 92** (ya viene escrito e
 
 Atajo: copia `.env.example` a `.env.production`, rellénalo y ejecuta `./scripts/vercel-env.sh`.
 
-## 1. Telegram (aviso instantáneo a la dueña) · 5 min · gratis
-1. En Telegram abre **@BotFather** → `/newbot` → pon un nombre → copia el **token** → `TELEGRAM_BOT_TOKEN`.
-2. Abre tu bot y escríbele «hola».
-3. Entra en `https://api.telegram.org/bot<TOKEN>/getUpdates` y copia el número de `"chat":{"id":...}` → `TELEGRAM_CHAT_ID`.
-4. Redeploy → Ajustes → **Probar Telegram**.
+## 1. Telegram (aviso instantáneo a la dueña) · 2 min · gratis
+Te llega al móvil cada reserva nueva, cancelación y respuesta, y el **resumen diario de reservas** (a la hora que elijas en Ajustes → «Aviso diario de reservas nuevas»). Todo queda también en la pestaña **Avisos** del panel.
+1. En Telegram abre **@BotFather** → `/newbot` → ponle nombre y usuario → copia el **token** (`123456789:AAH…`).
+2. Abre tu bot nuevo (el enlace `t.me/…` que te da BotFather) y pulsa **Iniciar** (o escríbele «hola»).
+3. `node scripts/telegram-setup.mjs <TOKEN>` → comprueba el token, encuentra tu chat, te manda un mensaje de prueba y guarda `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en `.env.telegram` (no se sube a git).
+4. Súbelas a Vercel: `./scripts/vercel-env.sh .env.telegram` y redespliega. Ajustes → **Probar Telegram**.
 
 ## 2. Recordatorios automáticos (GitHub) · 5 min · gratis
 El workflow `.github/workflows/reminders.yml` llama cada ~10 min a `/api/cron/reminders` (recordatorios, recuperación de reservas, «vino» automático, limpieza…).

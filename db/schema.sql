@@ -676,3 +676,17 @@ WHERE c.id = x.customer_id AND c.preferred_staff_id IS NULL;
 
 -- El candado «v2» (toda la cita de una profesional) quedó sustituido por «v3» + bloques: se asegura de que ninguna migración antigua lo recree
 ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_no_overlap_v2;
+
+-- Bandeja de avisos del panel (cada aviso a la dueña queda también aquí) y resumen diario de reservas nuevas
+CREATE TABLE IF NOT EXISTS admin_notifications (
+  id         bigserial PRIMARY KEY,
+  at         timestamptz NOT NULL DEFAULT now(),
+  kind       text NOT NULL,
+  title      text NOT NULL,
+  body       text,
+  booking_id uuid,
+  read_at    timestamptz
+);
+CREATE INDEX IF NOT EXISTS admin_notifications_idx ON admin_notifications (read_at, at DESC);
+INSERT INTO settings (key, value) VALUES ('digest_enabled', 'on') ON CONFLICT (key) DO NOTHING;   -- resumen diario de reservas nuevas
+INSERT INTO settings (key, value) VALUES ('digest_hour', '21')    ON CONFLICT (key) DO NOTHING;   -- hora local a la que sale

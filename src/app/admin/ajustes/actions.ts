@@ -532,3 +532,13 @@ export async function saveResourceAction(fd: FormData) {
   revalidatePath("/admin/ajustes");
   done("Unidad guardada");
 }
+
+export async function saveDigestAction(fd: FormData) {
+  await guard("saveDigestAction");
+  const hour = z.coerce.number().int().min(0, "La hora va de 0 a 23").max(23, "La hora va de 0 a 23").safeParse(str(fd, "digest_hour") || "21");
+  if (!hour.success) fail(hour.error.issues[0]?.message ?? "Revisa la hora");
+  await put("digest_enabled", fd.get("digest_enabled") === "on" ? "on" : "off");
+  await put("digest_hour", String(hour.data!));
+  revalidatePath("/admin/ajustes");
+  done(`Resumen diario guardado: a las ${String(hour.data).padStart(2, "0")}:00`);
+}

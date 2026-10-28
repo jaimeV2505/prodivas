@@ -246,3 +246,10 @@ export async function redeemReferralAction(fd: FormData) {
   revalidatePath(`/admin/clientas/${id}`);
   redirect(`/admin/clientas/${id}?ok=${encodeURIComponent(r.length ? "Premio por amiga canjeado." : "No tiene premios por amigas pendientes.")}`);
 }
+
+export async function markNoticesReadAction() {
+  await guard();
+  await query(`UPDATE admin_notifications SET read_at = now() WHERE read_at IS NULL`);
+  revalidatePath("/admin/avisos");
+  redirect("/admin/avisos");
+}

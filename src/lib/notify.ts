@@ -5,6 +5,7 @@ import { fill } from "./i18n";
 import { msg } from "./i18n/msg";
 import type { BookingSummary } from "./bookings";
 import { devMode, enabled, logSend, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type Channel, type SendResult } from "./messaging";
+import { pushInbox } from "./inbox";
 import { gsm, manageLink, siteUrl } from "./site";
 
 const esc = (s: string) =>
@@ -312,6 +313,8 @@ export async function notifyReactivation(p: { name: string; phone: string; email
 
 async function toOwner(b: BookingSummary | null, kind: string, html: string, subject: string): Promise<void> {
   const jobs: Promise<unknown>[] = [];
+  // Siempre queda en la bandeja del panel (campana de /admin), además de salir por los canales configurados
+  jobs.push(pushInbox(kind, subject, html.replace(/<[^>]+>/g, "").trim(), b && b.id && !b.id.startsWith("raw") ? b.id : null));
   if (enabled.telegram()) jobs.push(run(b?.id ?? null, kind, "telegram", () => sendTelegram(html)));
   // SMS a la dueña: si lo activas (OWNER_SMS=on) o si no hay Telegram ni email para avisarla (así siempre le llega algo)
   const phone = process.env.OWNER_PHONE || CONFIG.salon.phoneE164;
@@ -461,4 +464,17 @@ export async function notifyOwnerReview(b: BookingSummary, rating: number, comme
     `${bad ? "⚠️" : "⭐"} <b>Valoración ${stars}</b> de ${esc(b.customerName ?? "")} (${esc(b.serviceName)}, ${esc(fmtLong(b.startsAt))})${comment ? `\n<i>${esc(comment)}</i>` : ""}${bad ? `\nQuizá quieras escribirle: ${esc(b.customerPhone ?? "")}` : ""}`,
     `${bad ? "Valoración baja" : "Valoración"}: ${b.customerName ?? ""} ${stars}`,
   );
+}
+
+/** Resumen para la dueña por TODOS los canales (Telegram, email, SMS al teléfono de contacto) y la bandeja del panel. */
+export async function notifyOwnerDigest(html: string, subject: string): Promise<void> {
+  const phone = process.env.OWNER_PHONE || CONFIG.salon.phoneE164;
+  const text = gsm(html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 320));
+  const jobs: Promise<unknown>[] = [pushInbox("digest", subject, html.replace(/<[^>]+>/g, "").trim())];
+  if (enabled.telegram()) jobs.push(run(null, "owner_digest", "telegram", () => sendTelegram(html)));
+  if (enabled.sms()) jobs.push(run(null, "owner_digest", "sms", () => sendSms(phone, text)));
+  else if (devMode()) jobs.push(run(null, "owner_digest", "dev", async () => ({ ok: true, detail: `→ dueña ${phone}: ${text}` })));
+  const owner = process.env.OWNER_EMAIL;
+  if (owner && enabled.email()) jobs.push(run(null, "owner_digest", "email", () => sendEmail([owner], subject, `<div style="font-family:system-ui,sans-serif;white-space:pre-line">${html.replace(/<\/?b>/g, "").replace(/<\/?i>/g, "")}</div>`)));
+  await Promise.all(jobs);
 }

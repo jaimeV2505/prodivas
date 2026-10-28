@@ -108,6 +108,21 @@ try {
   } finally {
     await db.query(`DELETE FROM staff WHERE id = $1`, [extra]);
   }
+
+  console.log("\n6. Avisos a la dueña y resumen diario");
+  const inbox = (await db.query(`SELECT count(*)::int AS n FROM admin_notifications WHERE kind = 'owner_new' AND title LIKE '%Growth%'`)).rows[0].n;
+  check(inbox >= 1, "cada reserva nueva deja un aviso en la bandeja del panel", String(inbox));
+  const isTest = (await db.query(`SELECT value FROM settings WHERE key = 'digest_hour'`)).rows[0]?.value;
+  await db.query(`INSERT INTO settings (key, value) VALUES ('digest_enabled','on') ON CONFLICT (key) DO UPDATE SET value='on'`);
+  await db.query(`INSERT INTO settings (key, value) VALUES ('digest_hour','0') ON CONFLICT (key) DO UPDATE SET value='0'`);
+  await db.query(`DELETE FROM settings WHERE key IN ('last_digest')`);
+  await db.query(`DELETE FROM settings WHERE key = 'last_digest_at'`);
+  const cr2 = await cron();
+  check(cr2.lifecycle?.digest === true, "a la hora elegida sale el resumen de reservas nuevas", JSON.stringify(cr2.lifecycle));
+  check((await db.query(`SELECT 1 FROM admin_notifications WHERE kind = 'digest' AND at > now() - interval '2 minutes'`)).rowCount >= 1, "y queda en la bandeja del panel");
+  const cr3 = await cron();
+  check(cr3.lifecycle?.digest === false, "no se repite el mismo día");
+  await db.query(`UPDATE settings SET value = $1 WHERE key = 'digest_hour'`, [isTest ?? "21"]);
 } finally {
   const phones = `6880%`;
   await db.query(`DELETE FROM bookings WHERE customer_phone LIKE $1 OR customer_name LIKE 'Growth %'`, [phones]);
@@ -116,6 +131,7 @@ try {
   await db.query(`DELETE FROM phone_otps WHERE phone_key LIKE $1`, [phones]);
   await db.query(`DELETE FROM funnel_events WHERE session_id LIKE 'gt\\_%'`);
   await db.query(`DELETE FROM notification_log WHERE detail LIKE '%6880%'`);
+  await db.query(`DELETE FROM admin_notifications WHERE title LIKE '%Growth%' OR body LIKE '%6880%' OR (kind = 'digest' AND at > now() - interval '10 minutes')`);
   await db.end();
 }
 console.log(`\n${fail === 0 ? "✅" : "❌"} ${pass} correctas, ${fail} con fallos`);

@@ -20,6 +20,7 @@ import {
   addResourceAction,
   saveResourceAction,
   saveGrowthAction,
+  saveDigestAction,
   saveStaffSkillsAction,
   revokeSessionsAction,
   addPackAction,
@@ -110,7 +111,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     query<AddonRow>(`SELECT id, name, description, duration_min, price_cents, category, active, sort FROM addons ORDER BY active DESC, sort, id`).catch(() => [] as AddonRow[]),
     getDepositPolicy().catch(() => ({ mode: "service" as const, afterNoShows: 1, defaultCents: 1000 })),
     getLoyalty().catch(() => ({ enabled: false, every: 10, reward: "una manicura clásica gratis" })),
-    query<{ key: string; value: string }>(`SELECT key, value FROM settings WHERE key IN ('auto_showed','abandon_recovery','reactivation_days','referral_enabled','referral_reward')`).catch(() => []),
+    query<{ key: string; value: string }>(`SELECT key, value FROM settings WHERE key IN ('auto_showed','abandon_recovery','reactivation_days','referral_enabled','referral_reward','digest_enabled','digest_hour')`).catch(() => []),
     query<{ staff_id: number; service_id: number }>(`SELECT staff_id, service_id FROM staff_services`).catch(() => []),
     query<{ at: string; action: string; target: string | null }>(`SELECT to_char(at AT TIME ZONE $1::text, 'DD/MM HH24:MI') AS at, action, target FROM audit_log ORDER BY at DESC LIMIT 12`, [CONFIG.tz]).catch(() => []),
   ]);
@@ -300,6 +301,19 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field field--narrow"><span>Visitas por premio</span><input type="number" name="every" min={2} max={50} defaultValue={loyalty.every} /></label>
           <label className="field field--wide"><span>Premio</span><input name="reward" maxLength={80} defaultValue={loyalty.reward} /></label>
           <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Aviso diario de reservas nuevas</h2>
+        <p className="muted small">
+          Cada día, a la hora que elijas, te llega un resumen de las reservas que han entrado (y las canceladas) por Telegram, email, SMS al {CONFIG.salon.phoneMobile} y en la pestaña «Avisos» del panel.
+          Además, cada reserva nueva te avisa al momento por Telegram (si lo tienes configurado) y queda en «Avisos». Si ese día no ha entrado nada, no te molesta.
+        </p>
+        <form action={saveDigestAction} className="svc">
+          <label className="check"><input type="checkbox" name="digest_enabled" defaultChecked={growth.get("digest_enabled") !== "off"} /><span>Enviarme el resumen diario</span></label>
+          <label className="field field--narrow"><span>Hora (0–23, hora del salón)</span><input type="number" name="digest_hour" min={0} max={23} defaultValue={growth.get("digest_hour") ?? "21"} /></label>
+          <button className="btn btn--primary btn--sm" type="submit">Guardar</button>
         </form>
       </section>
 

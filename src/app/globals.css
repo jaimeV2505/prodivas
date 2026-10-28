@@ -1465,3 +1465,7 @@ a, button, summary, label, input, select, textarea, [role="button"], [role="radi
 .pose__badges { grid-column: 1 / -1; display: flex; gap: 6px; flex-wrap: wrap; margin: 0; }
 .pose__badge { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #fde3ef; color: #8a1650; font-size: 0.78rem; font-weight: 700; }
 .pose__badge--res { background: #e9e3fd; color: #4a2d9a; }
+
+/* ---------- avisos del panel: contador junto a la pestaña ---------- */
+.badge-n { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 6px; margin-left: 6px; border-radius: 999px; background: var(--magenta); color: #fff; font-size: 0.75rem; font-weight: 800; line-height: 1; }
+.admin__tab.is-on .badge-n { background: #fff; color: var(--magenta); }

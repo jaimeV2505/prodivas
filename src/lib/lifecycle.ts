@@ -2,7 +2,9 @@ import { CONFIG } from "./config";
 import { todayIn } from "./dates";
 import { query } from "./db";
 import { expireHolds, markAttendance } from "./bookings";
-import { notifyAbandoned, notifyOwnerRaw, notifyReactivation } from "./notify";
+import { fmtPrice } from "./format";
+import { notifyAbandoned, notifyOwnerDigest, notifyOwnerRaw, notifyReactivation } from "./notify";
+import { localHour } from "./quiet";
 import { optoutUrl } from "./optout";
 import { purgeRateHits } from "./ratelimit";
 import { siteUrl } from "./site";
@@ -142,9 +144,57 @@ export async function runRetention(): Promise<boolean> {
   return true;
 }
 
+
+const esc = (t: string) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] as string);
+
+/**
+ * Resumen diario de reservas nuevas: a la hora que elijas en Ajustes (21:00 por defecto) le llega a la dueña, por Telegram,
+ * email, SMS al teléfono de contacto y en la bandeja del panel, lo que ha entrado (y se ha cancelado) desde el último resumen.
+ * Una sola vez al día; si no ha pasado nada, no molesta.
+ */
+export async function runNewBookingsDigest(): Promise<boolean> {
+  if ((await setting("digest_enabled", "on")) !== "on") return false;
+  const hour = Number(await setting("digest_hour", "21"));
+  const today = todayIn(CONFIG.tz);
+  if (localHour() < (Number.isFinite(hour) ? hour : 21)) return false;
+  if ((await setting("last_digest", "")) === today) return false;
+  const since = (await setting("last_digest_at", "")) || new Date(Date.now() - 24 * 3600_000).toISOString();
+  // se «reserva» el día antes de enviar: si el cron se solapa, no sale dos veces
+  const claim = await query(
+    `INSERT INTO settings (key, value) VALUES ('last_digest', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value WHERE settings.value <> EXCLUDED.value RETURNING key`,
+    [today],
+  );
+  if (!claim.length) return false;
+  await query(`INSERT INTO settings (key, value) VALUES ('last_digest_at', now()::text) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`);
+
+  const fresh = await query<{ when: string; who: string | null; phone: string | null; service: string; cents: number; src: string }>(
+    `SELECT to_char(b.starts_at AT TIME ZONE $2::text, 'DD/MM HH24:MI') AS "when", b.customer_name AS who, b.customer_phone AS phone,
+            COALESCE((SELECT string_agg(bs.name, ' + ' ORDER BY bs.position) FROM booking_services bs WHERE bs.booking_id = b.id), s.name) AS service,
+            COALESCE((SELECT SUM(bs.price_cents)::int FROM booking_services bs WHERE bs.booking_id = b.id), s.price_cents) AS cents, b.source AS src
+     FROM bookings b JOIN services s ON s.id = b.service_id
+     WHERE b.status = 'CONFIRMED' AND b.confirmed_at > $1::timestamptz AND b.customer_phone NOT LIKE '699000%'
+     ORDER BY b.starts_at`,
+    [since, CONFIG.tz],
+  );
+  const cancelled = await query<{ n: number }>(`SELECT count(*)::int AS n FROM bookings WHERE status = 'CANCELLED' AND cancelled_at > $1::timestamptz AND confirmed_at IS NOT NULL`, [since]);
+  const nCancel = cancelled[0]?.n ?? 0;
+  if (!fresh.length && !nCancel) return false;
+
+  const total = fresh.reduce((a, r) => a + r.cents, 0);
+  const lines = fresh.slice(0, 12).map((r) => `• ${esc(r.when)} · ${esc(r.service)} · ${esc(r.who ?? "")}${r.phone ? ` (${esc(r.phone)})` : ""}${r.src === "admin" ? " · manual" : ""}`);
+  if (fresh.length > 12) lines.push(`… y ${fresh.length - 12} más`);
+  const html =
+    `📥 <b>Reservas nuevas de hoy: ${fresh.length}</b>${fresh.length ? ` · ${esc(fmtPrice(total))}` : ""}` +
+    (lines.length ? `\n${lines.join("\n")}` : "") +
+    (nCancel ? `\n❌ Canceladas: ${nCancel}` : "") +
+    `\n${siteUrl()}/admin`;
+  await notifyOwnerDigest(html, `Reservas nuevas de hoy: ${fresh.length}${nCancel ? ` · ${nCancel} canceladas` : ""}`);
+  return true;
+}
+
 /** Todo junto, tolerante a fallos: una tarea que falle no impide las demás. */
-export async function runLifecycle(daytime: boolean): Promise<{ expired: number; revived: number; autoShowed: number; recovered: number; reactivated: number; retention: boolean }> {
-  const out = { expired: 0, revived: 0, autoShowed: 0, recovered: 0, reactivated: 0, retention: false };
+export async function runLifecycle(daytime: boolean): Promise<{ expired: number; revived: number; autoShowed: number; recovered: number; reactivated: number; retention: boolean; digest: boolean }> {
+  const out = { expired: 0, revived: 0, autoShowed: 0, recovered: 0, reactivated: 0, retention: false, digest: false };
   const step = async (name: string, fn: () => Promise<void>) => {
     try {
       await fn();
@@ -159,6 +209,7 @@ export async function runLifecycle(daytime: boolean): Promise<{ expired: number;
     await step("abandon", async () => void (out.recovered = await runAbandonRecovery()));
     await step("reactivation", async () => void (out.reactivated = await runReactivation()));
   }
+  await step("digest", async () => void (out.digest = await runNewBookingsDigest()));
   await step("retention", async () => void (out.retention = await runRetention()));
   return out;
 }

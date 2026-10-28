@@ -12,3 +12,4 @@ public/hero/*.mp4
 .env*.local
 .env.vercel
 .env*.local
+.env*
