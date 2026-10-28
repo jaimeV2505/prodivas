@@ -1,6 +1,8 @@
 import type { Metadata, Viewport } from "next";
 import { Bricolage_Grotesque, Figtree } from "next/font/google";
+import ConsentBanner from "@/components/ConsentBanner";
 import Curtain from "@/components/Curtain";
+import PageTrack from "@/components/PageTrack";
 import { siteUrl } from "@/lib/site";
 import "./globals.css";
 
@@ -35,7 +37,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="es" className={`${display.variable} ${body.variable}`}>
       <body>
         <Curtain />
+        <PageTrack />
         {children}
+        <ConsentBanner />
       </body>
     </html>
   );

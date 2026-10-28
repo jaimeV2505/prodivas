@@ -8,12 +8,13 @@ import { CONFIG } from "@/lib/config";
 import { query } from "@/lib/db";
 import { fmtPrice, waLink } from "@/lib/format";
 import { getLoyalty, stampsOf } from "@/lib/loyalty";
-import { redeemLoyaltyAction, saveCustomerNotesAction } from "../../actions";
+import { redeemLoyaltyAction, redeemReferralAction, saveCustomerNotesAction } from "../../actions";
+import { getReferralSettings } from "@/lib/referrals";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Ficha de clienta", robots: { index: false, follow: false } };
 
-type Customer = { id: number; name: string; phone: string; email: string | null; notes: string | null; no_show_count: number; visit_count: number; since: string; loyalty_redeemed: number; optout_at: string | null };
+type Customer = { id: number; name: string; phone: string; email: string | null; notes: string | null; no_show_count: number; visit_count: number; since: string; loyalty_redeemed: number; optout_at: string | null; referral_rewards: number; referral_redeemed: number; referred_by: number | null; referrer_name: string | null; referred_count: number; preferred_staff: string | null };
 type Hist = { id: string; when: string; iso: string; status: string; attendance: string | null; service: string; price: number; deposit: string };
 
 export default async function CustomerPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ ok?: string }> }) {
@@ -29,7 +30,9 @@ export default async function CustomerPage({ params, searchParams }: { params: P
   if (!Number.isInteger(cid) || cid <= 0) notFound();
   const c = (
     await query<Customer>(
-      `SELECT id, name, phone, email, notes, no_show_count, visit_count, loyalty_redeemed, optout_at::text AS optout_at, to_char(created_at AT TIME ZONE $2::text, 'DD/MM/YYYY') AS since FROM customers WHERE id = $1::bigint`,
+      `SELECT c.id, c.name, c.phone, c.email, c.notes, c.no_show_count, c.visit_count, c.loyalty_redeemed, c.optout_at::text AS optout_at, to_char(c.created_at AT TIME ZONE $2::text, 'DD/MM/YYYY') AS since,
+              c.referral_rewards, c.referral_redeemed, c.referred_by, r.name AS referrer_name, (SELECT count(*)::int FROM customers x WHERE x.referred_by = c.id) AS referred_count, (SELECT name FROM staff WHERE id = c.preferred_staff_id) AS preferred_staff
+       FROM customers c LEFT JOIN customers r ON r.id = c.referred_by WHERE c.id = $1::bigint`,
       [cid, CONFIG.tz],
     )
   )[0];
@@ -45,6 +48,8 @@ export default async function CustomerPage({ params, searchParams }: { params: P
   );
   const loyalty = await getLoyalty().catch(() => ({ enabled: false, every: 10, reward: "" }));
   const stamps = stampsOf(c.visit_count, c.loyalty_redeemed ?? 0, loyalty.every);
+  const referral = await getReferralSettings().catch(() => ({ enabled: false, reward: "" }));
+  const refPending = Math.max(0, (c.referral_rewards ?? 0) - (c.referral_redeemed ?? 0));
   const spent = hist.filter((h) => h.attendance === "SHOWED").reduce((a, h) => a + h.price, 0);
 
   return (
@@ -75,7 +80,24 @@ export default async function CustomerPage({ params, searchParams }: { params: P
               </dd>
             </>
           )}
+          {(c.referred_by || c.referred_count > 0 || refPending > 0) && (
+            <>
+              <dt>Amigas</dt>
+              <dd>
+                {c.referrer_name ? `Vino de la mano de ${c.referrer_name}. ` : ""}
+                {c.referred_count > 0 ? `Ha traído a ${c.referred_count}. ` : ""}
+                {refPending > 0 ? `🎁 ${refPending} premio${refPending === 1 ? "" : "s"} pendiente${refPending === 1 ? "" : "s"} (${referral.reward})` : ""}
+                {refPending > 0 && (
+                  <form action={redeemReferralAction} className="inline-form">
+                    <input type="hidden" name="id" value={c.id} />
+                    <button className="btn btn--primary btn--sm" type="submit">Canjear premio</button>
+                  </form>
+                )}
+              </dd>
+            </>
+          )}
           {c.optout_at && (<><dt>Mensajes</dt><dd>De baja de los mensajes opcionales (los avisos de la cita siguen llegando)</dd></>)}
+          {c.preferred_staff && (<><dt>Profesional habitual</dt><dd>{c.preferred_staff}</dd></>)}
           <dt>Plantones</dt><dd className={c.no_show_count >= 2 ? "warn-inline" : ""}>{c.no_show_count}{c.no_show_count >= 2 ? " ⚠ conviene confirmar sus citas por teléfono" : ""}</dd>
         </dl>
       </section>

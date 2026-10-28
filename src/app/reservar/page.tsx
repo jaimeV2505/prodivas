@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import BookingFlow, { type Staff } from "@/components/BookingFlow";
+import SiteFooter from "@/components/SiteFooter";
 import SiteHeader from "@/components/SiteHeader";
 import { loadCatalog } from "@/lib/catalog";
 import { CONFIG } from "@/lib/config";
@@ -15,7 +16,7 @@ export const metadata: Metadata = { title: "Reservar cita" };
 export default async function ReservarPage({
   searchParams,
 }: {
-  searchParams: Promise<{ servicio?: string; dia?: string; hora?: string; color?: string; extra?: string }>;
+  searchParams: Promise<{ servicio?: string; dia?: string; hora?: string; color?: string; extra?: string; pro?: string }>;
 }) {
   const sp = await searchParams;
   const T = getDict();
@@ -44,6 +45,7 @@ export default async function ReservarPage({
           initialExtras={sp.extra ? sp.extra.split(",").filter((x) => /^[a-z0-9-]{1,60}$/.test(x)).slice(0, 5) : undefined}
           initialDay={sp.dia && isDay(sp.dia) ? sp.dia : undefined}
           initialTime={sp.hora && /^\d{2}:\d{2}$/.test(sp.hora) ? sp.hora : undefined}
+          initialStaffId={sp.pro && /^\d{1,6}$/.test(sp.pro) ? Number(sp.pro) : undefined}
           initialColor={sp.color ? sp.color.replace(/[^\p{L}\p{N} ]/gu, "").slice(0, 40) || undefined : undefined}
           today={today}
           maxDate={addDays(today, CONFIG.maxDaysAhead)}
@@ -53,6 +55,7 @@ export default async function ReservarPage({
           refundHours={DEPOSIT_REFUND_HOURS}
         />
       </main>
+      <SiteFooter />
     </>
   );
 }

@@ -1,0 +1,17 @@
+name: Recordatorios
+# Llama cada ~10 minutos al ciclo de recordatorios, avisos, recuperación de reservas y limpieza.
+# Necesita los secretos CRON_SECRET (el mismo de Vercel) y SITE_URL (https://tu-dominio).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar al cron
+        run: |
+          curl --fail --silent --show-error --max-time 60 -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.SITE_URL }}/api/cron/reminders"

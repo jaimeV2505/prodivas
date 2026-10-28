@@ -5,8 +5,10 @@ import { query } from "./db";
 import { getSummaryById } from "./bookings";
 import { notifyAftercare, notifyOwnerUnconfirmed, notifyRebookNudge, notifyReminder } from "./notify";
 import { optoutUrl } from "./optout";
+import { siteUrl } from "./site";
 import { runDeliveryFallback } from "./fallback";
 import { runDailySummary, runTomorrowSummary } from "./summary";
+import { runLifecycle } from "./lifecycle";
 import { expireWaitlist } from "./waitlist";
 
 export type RunResult = {
@@ -19,6 +21,7 @@ export type RunResult = {
   tomorrow: boolean;
   aftercare: number;
   nudges: number;
+  lifecycle?: Awaited<ReturnType<typeof runLifecycle>>;
 };
 
 /**
@@ -140,6 +143,7 @@ export async function runReminders(): Promise<RunResult> {
     }
   }
   await expireWaitlist();
+  out.lifecycle = await runLifecycle(inWindow(h, OPTIONAL_WINDOW.from(), OPTIONAL_WINDOW.to()));
   return out;
 }
 
@@ -184,7 +188,7 @@ export async function runRebookNudges(): Promise<number> {
     if (!claim.length) continue;
     const b = await getSummaryById(r.id);
     if (!b || b.customerId == null) continue;
-    if (await notifyRebookNudge(b, r.name, r.weeks, optoutUrl(b.customerId))) n++;
+    if (await notifyRebookNudge(b, r.name, r.weeks, optoutUrl(b.customerId), `${siteUrl()}/reservar?${new URLSearchParams({ servicio: r.slug, pro: String(b.staffId), utm_source: "retoque", utm_medium: "msg" })}`)) n++;
   }
   return n;
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import { VIDEOS } from "@/lib/videos.generated";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useReducedMotion } from "framer-motion";
@@ -42,7 +43,7 @@ export default function Hero({ services, today, contact }: { services: HeroServi
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
-    if (reduce) return;
+    if (reduce || !VIDEOS.includes("hero")) return;
     let off = false;
     fetch("/videos/hero.mp4", { method: "HEAD" })
       .then((r) => !off && setVideo(r.ok && (r.headers.get("content-type") ?? "").includes("video")))

@@ -1,7 +1,9 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { getBookingByCode, listCustomerBookings } from "@/lib/bookings";
-import { respond } from "@/lib/http";
+import { hashIp } from "@/lib/bookings";
+import { clientIp, respond } from "@/lib/http";
+import { limit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +17,7 @@ const Body = z.object({
  */
 export async function POST(req: NextRequest) {
   return respond(async () => {
+    await limit(`mybk:${hashIp(clientIp(req))}`, 40, 600);
     const { items } = Body.parse(await req.json());
     const known = (await Promise.all(items.map((i) => getBookingByCode(i.code.toUpperCase(), i.token)))).filter((b) => !!b);
     const customerIds = Array.from(new Set(known.map((b) => b!.customerId).filter((id): id is number => id !== null)));

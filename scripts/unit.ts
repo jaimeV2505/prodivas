@@ -11,6 +11,7 @@ import { quizAddon, quizResult, quizServices } from "../src/lib/quiz";
 import { inWindow, isQuiet } from "../src/lib/quiet";
 import { msgEs } from "../src/lib/i18n/msg";
 import { optoutToken, parseOptoutToken } from "../src/lib/optout";
+import { buildBlocks, buildPattern, formatPhases, mergeSegs, normalizePhases, parsePhases, simplePattern, waitMinutes } from "../src/lib/blocks";
 
 let fails = 0;
 let total = 0;
@@ -173,6 +174,43 @@ const repeat = { deposit_policy: "repeat", deposit_after_no_shows: "1", deposit_
 {
   const f = fakeRunner({ ...repeat, deposit_after_no_shows: "2" }, 1, 0);
   check((await effectiveDeposit(f.q, "b1", "600123456", 0, true)) === 0, "si se exigen 2 plantones y lleva 1, todavía no se pide");
+}
+
+/* ---- fases de pose y recursos ---- */
+{
+  check(JSON.stringify(parsePhases("30 + 45e + 30")) === JSON.stringify([{ kind: "active", minutes: 30 }, { kind: "wait", minutes: 45 }, { kind: "active", minutes: 30 }]), "«30 + 45e + 30» se entiende: actúa, espera, actúa");
+  check(parsePhases("30 + abc") === null && parsePhases("0") === null, "lo que no es un número de minutos se rechaza");
+  check(formatPhases(parsePhases("30+45e+30")!) === "30 + 45e + 30", "las fases se escriben igual que se leen");
+  check(JSON.stringify(mergeSegs([{ o: 0, l: 30 }, { o: 30, l: 15 }, { o: 60, l: 10 }, { o: 65, l: 20 }])) === JSON.stringify([{ o: 0, l: 45 }, { o: 60, l: 25 }]), "los tramos que se tocan o se solapan se unen");
+  check(normalizePhases(60, [{ kind: "active", minutes: 30 }]).length === 1 && normalizePhases(60, [{ kind: "active", minutes: 30 }])[0].minutes === 60, "unas fases que no suman la duración se ignoran (un solo bloque)");
+
+  const simple = buildPattern([{ durationMin: 45 }], 0, 15);
+  check(!simple.complex && simple.total === 60 && simple.active.length === 1 && simple.active[0].l === 60, "una visita simple es un solo bloque de duración + limpieza, como siempre");
+  check(JSON.stringify(simple) === JSON.stringify(buildPattern([{ durationMin: 45, phases: [] }], 0, 15)), "sin fases definidas da lo mismo que una visita simple");
+
+  const tinte = buildPattern([{ durationMin: 105, phases: [{ kind: "active", minutes: 30 }, { kind: "wait", minutes: 45 }, { kind: "active", minutes: 30 }] }], 0, 0);
+  check(tinte.complex && tinte.total === 105, "un tinte con espera es una visita compleja de 105 min");
+  check(JSON.stringify(tinte.active) === JSON.stringify([{ o: 0, l: 30 }, { o: 75, l: 30 }]), "la profesional solo está ocupada al principio y al final");
+  check(waitMinutes([{ durationMin: 105, phases: tinte.active.length ? [{ kind: "active", minutes: 30 }, { kind: "wait", minutes: 45 }, { kind: "active", minutes: 30 }] : [] }]) === 45, "se cuentan 45 min de pose para decírselo a la clienta");
+
+  const comb = buildPattern([
+    { durationMin: 105, phases: [{ kind: "active", minutes: 30 }, { kind: "wait", minutes: 45 }, { kind: "active", minutes: 30 }] },
+    { durationMin: 30 },
+  ], 10, 5);
+  check(JSON.stringify(comb.active) === JSON.stringify([{ o: 0, l: 30 }, { o: 75, l: 75 }]), "un servicio detrás del tinte, los extras y la limpieza se pegan a la última fase activa y se unen");
+  check(comb.total === 150, "el total incluye extras y limpieza");
+
+  const laser = buildPattern([{ durationMin: 30, resources: [{ kind: "laser", uses: "all" }] }], 0, 10);
+  check(laser.complex && laser.reqs.length === 1 && laser.reqs[0].ranges[0].l === 40, "un recurso «toda la cita» cubre la duración y la limpieza");
+  const lavado = buildPattern([{ durationMin: 105, phases: [{ kind: "active", minutes: 30 }, { kind: "wait", minutes: 45 }, { kind: "active", minutes: 30 }], resources: [{ kind: "lavacabezas", uses: "active" }] }]);
+  check(lavado.reqs[0].ranges.length === 2 && lavado.reqs[0].ranges[0].l === 30 && lavado.reqs[0].ranges[1].o === 75, "un recurso «solo mientras actúa» se libera durante la espera");
+
+  const t0 = new Date("2026-11-05T09:00:00Z");
+  const blocks = buildBlocks(comb, t0, 7, []);
+  check(blocks.length === 2 && blocks[0].staffId === 7 && blocks[1].start.getTime() === t0.getTime() + 75 * 60000, "los bloques de la profesional salen de los tramos activos");
+  const withRes = buildBlocks(lavado, t0, 7, [3]);
+  check(withRes.filter((b) => b.resourceId === 3).length === 2 && withRes.filter((b) => b.staffId === 7).length === 2, "cada unidad de recurso recibe sus propios bloques");
+  check(JSON.stringify(simplePattern(60).active) === JSON.stringify([{ o: 0, l: 60 }]), "el patrón simple es un solo tramo");
 }
 
   console.log(`\n${fails ? "✘" : "✔"} ${total - fails}/${total} pruebas correctas`);

@@ -33,6 +33,8 @@ Atajo: copia `.env.example` a `.env.production`, rellénalo y ejecuta `./scripts
 2. Pestaña **Actions → Recordatorios → Run workflow**. Debe responder `{"ok":true,...}`.
 3. En Ajustes aparecerá «Último ciclo de recordatorios: hace X min».
 
+> 💡 El workflow `.github/workflows/reminders.yml` ya viene en el proyecto: solo faltan los dos secretos. Sin él no salen recordatorios, ni recuperación de reservas, ni «vino» automático.
+
 ## 3. SMS con Twilio · 15 min · de pago por mensaje
 1. Crea la cuenta en twilio.com. `TWILIO_ACCOUNT_SID` y `TWILIO_AUTH_TOKEN` están en la consola.
 2. **Cuenta de prueba:** solo envía a números verificados → Phone Numbers → *Verified Caller IDs* → añade **+46793250692**.

@@ -100,7 +100,7 @@ export async function offerWindow(startsAtIso: string, endsAtIso: string, maxPeo
     const key = `${visit.durationMin}:${visit.stepMin}:${visit.bufferMin}`;
     let rows = cache.get(key);
     if (!rows) {
-      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: visit.durationMin, bufferMin: visit.bufferMin, stepMin: visit.stepMin });
+      rows = await getSlotRows({ from: freedDay, to: freedDay, durationMin: visit.durationMin, bufferMin: visit.bufferMin, stepMin: visit.stepMin, serviceIds: visit.items.map((i) => i.id), pattern: visit.pattern });
       cache.set(key, rows);
     }
     const dur = (visit.durationMin + visit.bufferMin) * 60_000;

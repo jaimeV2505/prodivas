@@ -15,7 +15,14 @@
     "vercel-build": "node scripts/migrate.mjs && next build",
     "audit:mobile": "node scripts/mobile-audit/run.cjs",
     "test:unit": "tsx scripts/unit.ts",
-    "migrate": "node scripts/migrate.mjs"
+    "migrate": "node scripts/migrate.mjs",
+    "cron": "node --env-file=.env scripts/dev-cron.mjs",
+    "demo:seed": "node --env-file=.env scripts/demo-data.mjs",
+    "demo:clear": "node --env-file=.env scripts/demo-data.mjs clear",
+    "test:growth": "node --env-file=.env scripts/e2e-growth.mjs",
+    "test:phases": "node --env-file=.env scripts/e2e-phases.mjs",
+    "predev": "node scripts/video-manifest.mjs",
+    "prebuild": "node scripts/video-manifest.mjs"
   },
   "dependencies": {
     "framer-motion": "^12.0.0",

@@ -3,6 +3,43 @@
 Web + reservas online para el centro de estética Pro Diva (Melide).
 Next.js 15 · React 19 · TypeScript · PostgreSQL · Framer Motion · Docker (local) · Vercel (producción).
 
+## Novedades: blindaje, embudo medible y crecimiento
+
+> **Verlo en local:** `docker compose up db -d` · `npm install` · `cp .env.example .env` (pon `SESSION_SECRET`, `ADMIN_PASSWORD`, `DEMO_MODE=on`) · `npm run db:migrate` · `npm run dev` · opcional `npm run demo:seed` (datos ficticios para ver el panel vivo; `npm run demo:clear` los borra) y `npm run cron` en otra terminal. Con `DEMO_MODE=on` y sin Twilio/WhatsApp, los mensajes no salen: se ven en **/admin/bandeja** («Mensajes») y el código de verificación aparece en pantalla.
+
+**Blindaje**
+- **Teléfono verificado con código** (`PHONE_VERIFY=off|new|all`, por defecto `new`): solo a números nuevos; quien ya vino o ya verificó no lo ve nunca. Frena reservas falsas y SMS a números ajenos. Sin canal para mandar el código (ni Twilio ni WhatsApp) queda desactivado salvo en `DEMO_MODE`.
+- **Frenos de peticiones** en Postgres (vale en Vercel): bloqueos por conexión, 12 confirmaciones/hora y **4 teléfonos distintos/día por conexión**, 8 reservas/día por teléfono, límites en disponibilidad, lista de espera, «mis citas» y respuestas. Para pruebas automáticas: `DISABLE_RATE_LIMITS=1` (ignorado en producción real).
+- **Panel**: login con tope de intentos (6 fallos/15 min por conexión), sesión de 3 días, **«Cerrar sesión en todos los dispositivos»** (Ajustes → Seguridad), registro de cambios (`audit_log`, últimos en Ajustes).
+- `SESSION_SECRET` es **obligatorio en producción** (antes los enlaces firmados caían a un secreto fijo). Cabeceras de seguridad + CSP (`next.config.mjs`).
+- Un bloqueo caducado ya no da falsos «hueco ocupado» (se limpia antes de escribir una hora y en cada ciclo del cron), y confirmar re-valida cierres/vacaciones. Una ficha verificada o con visitas no se pisa al reservar con su teléfono.
+- **RGPD**: `/privacidad`, `/aviso-legal`, `/cookies` (completa tus datos en `src/lib/legal.ts` y que los revise tu gestor), aviso de consentimiento (sin cookies de terceros) y **retención automática**: fichas sin actividad 3 años → anonimizadas; contactos sin reservar 90 días; registros de mensajes 12 meses.
+
+**Embudo medible** (`/admin/panel`)
+- Cada paso anónimo (entra → elige servicio → ve huecos → bloquea → rellena → deja teléfono → reserva) con % de caída y «aquí pierdes más gente», por origen (UTM / referrer), dispositivo, servicio, mapa de horas flojas, retención y dormidas. La conversión («reservada») la apunta el **servidor**, no el navegador. Sin consentimiento nada se guarda en el dispositivo.
+- **Recuperación de reservas a medias**: al escribir un teléfono válido con el hueco bloqueado se guarda el contacto; si no termina, a los 25 min–24 h se le escribe **una sola vez** con un enlace que reabre su servicio y su día (`WA_TEMPLATE_ABANDON` para WhatsApp; si no, SMS/email). Se desactiva en Ajustes.
+- **«Vino» automático**: 3 h después de una cita sin marcar cuenta como que vino (la dueña corrige solo las que no; se le avisa). Así no se corta nunca el «gracias» + cuidados + valoración + retoque + sellos.
+- La lista de espera **vuelve a activar** a quien fue avisado y no reservó (3 h).
+
+**Crecimiento**
+- **Trae a una amiga**: cada clienta tiene enlace propio (`/reservar?ref=CÓDIGO`) y botón de WhatsApp en su cita; cuando la amiga viene por primera vez las dos ganan el premio (se canjea desde la ficha). Premio editable en Ajustes.
+- **«Te echamos de menos»** (`WA_TEMPLATE_REACTIVATE`): a las clientas que llevan N días sin venir (75 por defecto; 0 = apagado), con su último servicio y baja; una vez cada 4 meses.
+- **SEO local**: `sitemap.xml`, `robots.txt`, JSON-LD de negocio y páginas por servicio (`/servicios/<slug>`) con CTA directo a reservar.
+- **Valoraciones sin filtro**: a todas se les ofrece dejarla en Google (Google desaconseja filtrar solo las buenas); las bajas además avisan al momento a la dueña.
+- **Prefill** de nombre y teléfono en este móvil para quien ya reservó.
+
+**Habilidades, reparto, pose y recursos** (diseño en `docs/DISENO-FASES-Y-RECURSOS.md`)
+- **Habilidades:** Ajustes → Profesionales → «Hace todos los servicios / solo…». Los huecos solo salen de quien puede hacer **todos** los servicios de la visita, y «sin preferencia» reparte por la que menos citas lleva ese día.
+- **Tiempos de pose:** en cada servicio, «Fases» (`30 + 45e + 30`: la «e» es espera, la suma debe ser la duración). Mientras la clienta espera, la profesional queda **libre para otra clienta**; la clienta lo ve como «incluye 45 min de pose». Las fases actúan dentro del horario; la espera puede cruzar la pausa del mediodía.
+- **Recursos compartidos:** Ajustes → Recursos (unidades exclusivas: «Cabina láser 1», «Lavacabezas 1/2»…) y, en el servicio, «Recurso necesario» + «toda la cita / solo mientras actúa». Dos profesionales no pueden usar a la vez la misma unidad, y sin unidades activas el servicio no ofrece huecos (aviso rojo en Ajustes).
+- **Cómo funciona por dentro:** una cita pasa a tener **varios bloques** (`booking_blocks`) y el candado de Postgres vive ahí (uno por profesional y otro por unidad de recurso). Las citas simples siguen siendo un solo bloque que mantiene un trigger. `AVAILABILITY_SHADOW=on` compara cada cálculo de huecos con el método antiguo y anota cualquier diferencia en `audit_log` (se verificaron cientos de cálculos con cero diferencias). A una cita con pose o recurso no se le ofrece «añadir un servicio» desde el móvil.
+- **Profesional habitual:** al venir, se guarda la más frecuente de sus últimas 5 visitas (ficha de la clienta); en este móvil la reserva ofrece «Con Laura, como siempre» y, si no hay huecos con ella, «Ver huecos con cualquier profesional»; los mensajes de retoque y «te echamos de menos» abren la reserva con su profesional (`?pro=`).
+- *Pendiente:* precio y duración por largo de pelo («variantes de servicio»), y varios tipos de recurso por servicio desde el editor (el motor ya los admite).
+
+**Cron** (imprescindible): `.github/workflows/reminders.yml` (secretos `CRON_SECRET` y `SITE_URL`), o `npm run cron` en local, o el servicio `cron` de `docker-compose.yml`. Cada ciclo: recordatorios, resúmenes, SMS de respaldo, post-visita, retoques, «vino» automático, recuperación, reactivación, limpieza de bloqueos y retención.
+
+**Pruebas**: `npm run test:unit` (sin base de datos) · `npm run test:e2e` (suite original, 134 comprobaciones; la web debe estar arrancada con `PHONE_VERIFY=off DISABLE_RATE_LIMITS=1`) · `npm run test:growth` (18 comprobaciones de lo nuevo; con la web en su configuración normal) · `npm run test:phases` (22 comprobaciones de pose, recursos y bloques, con un modelo de referencia aparte; la web con `PHONE_VERIFY=off DISABLE_RATE_LIMITS=1`). CI en `.github/workflows/ci.yml`.
+
 ## Qué hace
 
 - La clienta elige **servicio → (profesional) → día y hora → datos** y recibe confirmación con código.

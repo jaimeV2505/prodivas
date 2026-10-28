@@ -8,8 +8,8 @@ import type { MsgDict } from "@/lib/i18n/msg";
 type Props = { code: string; token: string; t: MsgDict; googleUrl: string | null; alreadyRated: boolean };
 
 /**
- * Valoración en dos pasos: las estrellas primero y en privado. Si son buenas (4–5) se invita a dejarla también
- * en Google; si no lo son, se pide qué mejorar (solo lo lee la dueña).
+ * Valoración en dos pasos: las estrellas primero. A TODAS se les ofrece dejarla también en Google (Google desaconseja
+ * filtrar solo las buenas); si son bajas (1–3) además se pide qué mejorar en privado, y la dueña recibe el aviso al momento.
  */
 export default function ReviewForm({ code, token, t, googleUrl, alreadyRated }: Props) {
   const [rating, setRating] = useState<number | null>(null);
@@ -83,6 +83,11 @@ export default function ReviewForm({ code, token, t, googleUrl, alreadyRated }: 
             <textarea rows={4} maxLength={600} value={comment} onChange={(e) => setComment(e.target.value)} />
           </label>
           <button type="button" className="easy__btn easy__btn--main" onClick={() => void send()}>{t.revSend}</button>
+          {googleUrl && (
+            <p className="muted small">
+              <a href={googleUrl} target="_blank" rel="noopener noreferrer" onClick={() => void post({ googleClicked: true }).catch(() => {})}>{t.revGoogle}</a>
+            </p>
+          )}
         </div>
       )}
     </div>

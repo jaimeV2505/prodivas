@@ -1,11 +1,12 @@
 import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
-import { getSlotRows } from "./availability";
+import { getSlotRows, type SlotRow } from "./availability";
 import { CONFIG } from "./config";
 import { addDays, todayIn } from "./dates";
 import { query, run, tx, type Runner } from "./db";
 import { BookingError, type ErrCode } from "./errors";
 import { createCheckoutSession, DEPOSIT_REFUND_HOURS, settleDeposit, stripeEnabled } from "./payments";
 import { pickAlternatives } from "./alternatives";
+import { buildBlocks, buildPattern, simplePattern, type Pattern, type Phase, type ResourceReq } from "./blocks";
 import { effectiveDeposit, getDepositPolicy } from "./deposit";
 import { localParts } from "./format";
 import { phoneDigits, samePhone } from "./site";
@@ -31,6 +32,29 @@ function remindAtSql(starts: string, tz: string, hours: string): string {
       CASE WHEN ${eve} > now() + interval '1 hour' THEN ${eve} ELSE NULL END
     ELSE ${starts} - make_interval(hours => ${hours})
   END`;
+}
+
+/**
+ * Un bloqueo caducado sigue ocupando el candado de la base de datos hasta que se marca como EXPIRED:
+ * se limpia antes de cualquier operación que escriba una hora (así nunca da un falso «hueco ocupado»).
+ */
+export async function expireHolds(q: Runner = run): Promise<number> {
+  const r = await q(`UPDATE bookings SET status = 'EXPIRED' WHERE status = 'HOLD' AND hold_expires_at <= now() RETURNING id`);
+  return r.length;
+}
+
+/** Elige la profesional entre las libres: la que ella pidió, y si no, la que menos citas lleva ese día (reparto justo). */
+async function pickStaff(q: Runner, free: SlotRow[], day: string, prefer?: number | null): Promise<number> {
+  const ids = Array.from(new Set(free.map((r) => r.staffId)));
+  if (ids.length === 1) return ids[0];
+  if (prefer && ids.includes(prefer)) return prefer;
+  const load = (await q(
+    `SELECT staff_id, count(*)::int AS n FROM bookings
+     WHERE status IN ('CONFIRMED','HOLD') AND staff_id = ANY($1::int[]) AND (starts_at AT TIME ZONE $3::text)::date = $2::date GROUP BY staff_id`,
+    [ids, day, CONFIG.tz],
+  )) as unknown as { staff_id: number; n: number }[];
+  const n = new Map(load.map((r) => [r.staff_id, r.n]));
+  return [...ids].sort((a, b) => (n.get(a) ?? 0) - (n.get(b) ?? 0) || a - b)[0];
 }
 
 /** Los enlaces de los mensajes llevan solo los 12 primeros caracteres del token. */
@@ -232,20 +256,59 @@ async function matchPackage(q: Runner, visit: Visit, slug: string | null): Promi
 }
 
 /** Duración, limpieza y paso de huecos de una cita ya creada (incluye los extras en la duración). */
-export async function bookingVisitMetrics(q: Runner, bookingId: string, fallbackMin = 30): Promise<{ duration: number; buffer: number; step: number }> {
+export async function bookingVisitMetrics(q: Runner, bookingId: string, fallbackMin = 30): Promise<{ duration: number; buffer: number; step: number; serviceIds: number[]; pattern: Pattern; custom: boolean }> {
   const svc = (await q(
-    `SELECT bs.duration_min, bs.buffer_min, bs.is_addon, COALESCE(s.slot_step_min, bs.duration_min) AS step_min
+    `SELECT bs.service_id, bs.duration_min, bs.buffer_min, bs.is_addon, COALESCE(s.slot_step_min, bs.duration_min) AS step_min, bs.phases, bs.resource_reqs
      FROM booking_services bs LEFT JOIN services s ON s.id = bs.service_id
      WHERE bs.booking_id = $1::uuid ORDER BY bs.position`,
     [bookingId],
-  )) as unknown as { duration_min: number; buffer_min: number; is_addon: boolean; step_min: number }[];
+  )) as unknown as { service_id: number | null; duration_min: number; buffer_min: number; is_addon: boolean; step_min: number; phases: Phase[] | null; resource_reqs: ResourceReq[] | null }[];
   const base = svc.filter((x) => !x.is_addon);
   const duration = svc.reduce((a, x) => a + x.duration_min, 0) || fallbackMin;
+  const buffer = base.length ? base[base.length - 1].buffer_min : 0;
+  const pattern = base.length
+    ? buildPattern(base.map((x) => ({ durationMin: x.duration_min, phases: x.phases, resources: x.resource_reqs })), svc.filter((x) => x.is_addon).reduce((a, x) => a + x.duration_min, 0), buffer)
+    : simplePattern(duration + buffer);
+  const cb = (await q(`SELECT custom_blocks FROM bookings WHERE id = $1::uuid`, [bookingId])) as unknown as { custom_blocks: boolean }[];
   return {
     duration,
-    buffer: base.length ? base[base.length - 1].buffer_min : 0,
+    buffer,
     step: Math.max(5, base.length ? Math.min(...base.map((x) => x.step_min)) : duration),
+    serviceIds: base.map((x) => x.service_id).filter((x): x is number => x !== null),
+    pattern,
+    custom: !!cb[0]?.custom_blocks,
   };
+}
+
+/** Elige una unidad libre de cada recurso que pide la visita (la primera por orden). Lanza «hueco ocupado» si falta alguna. */
+async function pickUnits(q: Runner, pattern: Pattern, start: Date, excludeBookingId: string | null = null): Promise<number[]> {
+  const at = (m: number) => new Date(start.getTime() + m * 60000).toISOString();
+  const out: number[] = [];
+  for (const req of pattern.reqs) {
+    const ranges = req.ranges.map((g) => `[${at(g.o)},${at(g.o + g.l)})`);
+    const r = (await q(
+      `SELECT r.id FROM resources r
+       WHERE r.active AND r.kind = $1
+         AND NOT EXISTS (SELECT 1 FROM booking_blocks bb JOIN bookings b ON b.id = bb.booking_id
+                          WHERE bb.resource_id = r.id AND bb.live AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
+                            AND ($3::uuid IS NULL OR b.id <> $3::uuid) AND bb.during && ANY($2::tstzrange[]))
+       ORDER BY r.sort, r.id LIMIT 1`,
+      [req.kind, ranges, excludeBookingId],
+    )) as unknown as { id: number }[];
+    if (!r[0]) throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de ocuparse. Elige otro.", 409);
+    out.push(r[0].id);
+  }
+  return out;
+}
+
+/** Escribe los bloques de una cita con fases o recursos (en la misma transacción que la cita: el candado decide). */
+async function writeBlocks(q: Runner, bookingId: string, pattern: Pattern, start: Date, staffId: number, units: number[]): Promise<void> {
+  for (const b of buildBlocks(pattern, start, staffId, units)) {
+    await q(
+      `INSERT INTO booking_blocks (booking_id, staff_id, resource_id, during, live) VALUES ($1::uuid, $2, $3, tstzrange($4::timestamptz, $5::timestamptz, '[)'), true)`,
+      [bookingId, b.staffId ?? null, b.resourceId ?? null, b.start.toISOString(), b.end.toISOString()],
+    );
+  }
 }
 
 /** Casillas de seguridad que pide cada cita según sus servicios (láser, microblading…). */
@@ -263,6 +326,17 @@ async function assertAndStoreConsents(q: Runner, bookingId: string, acks: string
   const missing = need.filter((k) => !acks.includes(k));
   if (missing.length) throw new BookingError("INVALID", "Falta marcar las casillas de seguridad del tratamiento.", 400);
   await q(`UPDATE bookings SET consent_acks = $2::text[], consent_at = now() WHERE id = $1::uuid`, [bookingId, need]);
+}
+
+/** El hueco no puede haber quedado dentro de un cierre (vacaciones, día cerrado) añadido mientras la clienta decidía. */
+async function assertNotClosed(q: Runner, ids: string[]): Promise<void> {
+  const r = (await q(
+    `SELECT 1 FROM bookings b JOIN time_off t ON (t.staff_id IS NULL OR t.staff_id = b.staff_id)
+       AND tstzrange(t.starts_at, t.ends_at, '[)') && tstzrange(b.starts_at, b.blocked_until, '[)')
+     WHERE b.id = ANY($1::uuid[]) LIMIT 1`,
+    [ids],
+  )) as unknown[];
+  if (r.length) throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de dejar de estar disponible. Elige otro.", 409);
 }
 
 /** Vincula la cita con la ficha de la clienta (se crea si es nueva). Devuelve cuántos plantones lleva. */
@@ -317,11 +391,19 @@ async function linkCustomer(q: Runner, bookingId: string): Promise<number> {
   const c = (await q(
     `INSERT INTO customers (phone_key, name, phone, email) VALUES ($1, $2, $3, $4)
      ON CONFLICT (phone_key) DO UPDATE
-       SET name = EXCLUDED.name, phone = EXCLUDED.phone, email = COALESCE(EXCLUDED.email, customers.email)
+       SET name = CASE WHEN customers.visit_count > 0 OR customers.verified_at IS NOT NULL THEN customers.name ELSE EXCLUDED.name END,
+           phone = EXCLUDED.phone,
+           email = CASE WHEN customers.visit_count > 0 OR customers.verified_at IS NOT NULL THEN COALESCE(customers.email, EXCLUDED.email) ELSE COALESCE(EXCLUDED.email, customers.email) END
      RETURNING id, no_show_count`,
     [phoneDigits(row.customer_phone).slice(-9), row.customer_name, row.customer_phone, row.customer_email],
   )) as unknown as { id: number; no_show_count: number }[];
   await q(`UPDATE bookings SET customer_id = $2::bigint WHERE id = $1::uuid`, [bookingId, c[0].id]);
+  // Si acaba de verificar el teléfono con el código, la ficha queda marcada como verificada (nadie más podrá pisarla)
+  await q(
+    `UPDATE customers SET verified_at = now() WHERE id = $1::bigint AND verified_at IS NULL
+       AND EXISTS (SELECT 1 FROM phone_otps WHERE phone_key = customers.phone_key AND used_at > now() - interval '1 hour')`,
+    [c[0].id],
+  );
   return c[0].no_show_count;
 }
 
@@ -348,6 +430,8 @@ export type HoldResult = {
 export async function createHold(input: {
   serviceIds: number[];
   staffId: number | null;
+  /** Si no hay profesional elegida: la preferida de la clienta, si está libre a esa hora. */
+  preferStaffId?: number | null;
   startsAt: string;
   ipHash: string;
   /** Si la clienta ya tenía un hueco bloqueado y elige otro, se cambia en la misma operación: si el nuevo falla, conserva el antiguo. */
@@ -360,7 +444,7 @@ export async function createHold(input: {
 }): Promise<HoldResult> {
   return tx(async (q) => {
     // Limpieza perezosa de bloqueos caducados
-    await q(`UPDATE bookings SET status = 'EXPIRED' WHERE status = 'HOLD' AND hold_expires_at <= now()`);
+    await expireHolds(q);
 
     // Cambio de hueco: el bloqueo anterior se libera dentro de esta misma transacción. Si el nuevo hueco
     // no es válido, se lanza un error, la transacción se deshace y el hueco anterior sigue guardado.
@@ -407,13 +491,13 @@ export async function createHold(input: {
     }
 
     const rows = await getSlotRows(
-      { from: day, to: day, durationMin: visit.durationMin, bufferMin: visit.bufferMin, stepMin: visit.stepMin, staffId: input.staffId },
+      { from: day, to: day, durationMin: visit.durationMin, bufferMin: visit.bufferMin, stepMin: visit.stepMin, staffId: input.staffId, serviceIds: visit.items.map((i) => i.id), pattern: visit.pattern },
       q,
     );
     const target = new Date(input.startsAt).getTime();
     const free = rows.filter((r) => r.available && new Date(r.startsAt).getTime() === target);
     if (!free.length) throw new BookingError("SLOT_TAKEN", "Ese hueco acaba de ocuparse. Elige otro.", 409);
-    const staffId = free[0].staffId;
+    const staffId = await pickStaff(q, free, day, input.staffId ?? input.preferStaffId);
 
     // Señal: con la política «solo a quien ya ha faltado», al reservar solo cuentan los servicios marcados «siempre»;
     // el resto se decide al confirmar, cuando ya se sabe quién es la clienta.
@@ -427,19 +511,19 @@ export async function createHold(input: {
     const holdToken = newToken();
     try {
       const ins = (await q(
-        `INSERT INTO bookings (staff_id, service_id, starts_at, ends_at, blocked_until, status, hold_expires_at, hold_token, ip_hash, deposit_cents, package_slug)
+        `INSERT INTO bookings (staff_id, service_id, starts_at, ends_at, blocked_until, status, hold_expires_at, hold_token, ip_hash, deposit_cents, package_slug, custom_blocks)
          VALUES ($1::int, $2::int, $3::timestamptz, $3::timestamptz + make_interval(mins => $4::int),
-                 $3::timestamptz + make_interval(mins => $5::int), 'HOLD', now() + make_interval(mins => $6::int), $7, $8, $9::int, $10)
+                 $3::timestamptz + make_interval(mins => $5::int), 'HOLD', now() + make_interval(mins => $6::int), $7, $8, $9::int, $10, $11::boolean)
          RETURNING id, EXTRACT(EPOCH FROM (hold_expires_at - now()))::int AS ttl`,
-        [staffId, visit.items[0].id, input.startsAt, visit.durationMin, visit.durationMin + visit.bufferMin, CONFIG.holdMinutes, holdToken, input.ipHash, holdDeposit, pack?.slug ?? null],
+        [staffId, visit.items[0].id, input.startsAt, visit.durationMin, visit.durationMin + visit.bufferMin, CONFIG.holdMinutes, holdToken, input.ipHash, holdDeposit, pack?.slug ?? null, visit.pattern.complex],
       )) as unknown as { id: string; ttl: number }[];
 
       for (let i = 0; i < visit.items.length; i++) {
         const it = visit.items[i];
         await q(
-          `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min)
-           VALUES ($1::uuid, $2::int, $3::int, $4, $5::int, $6::int, $7::int, $8::int)`,
-          [ins[0].id, it.id, i, it.name, it.durationMin, svcPrice(it.priceCents), it.depositCents, it.bufferMin],
+          `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min, phases, resource_reqs)
+           VALUES ($1::uuid, $2::int, $3::int, $4, $5::int, $6::int, $7::int, $8::int, $9::jsonb, $10::jsonb)`,
+          [ins[0].id, it.id, i, it.name, it.durationMin, svcPrice(it.priceCents), it.depositCents, it.bufferMin, it.phases.length ? JSON.stringify(it.phases) : null, it.resources.length ? JSON.stringify(it.resources) : null],
         );
       }
       for (let i = 0; i < visit.addons.length; i++) {
@@ -451,6 +535,10 @@ export async function createHold(input: {
         );
       }
 
+      if (visit.pattern.complex) {
+        const units = await pickUnits(q, visit.pattern, new Date(input.startsAt));
+        await writeBlocks(q, ins[0].id, visit.pattern, new Date(input.startsAt), staffId, units);
+      }
       const st = (await q(`SELECT name FROM staff WHERE id = $1::int`, [staffId])) as unknown as { name: string }[];
       return {
         holdId: ins[0].id,
@@ -505,6 +593,7 @@ export async function confirmBooking(input: {
     if (!row.future) throw new BookingError("HOLD_EXPIRED", "Ese horario ya ha pasado.", 410);
     let depositCents = row.deposit_cents;
     if (row.status !== "CONFIRMED") {
+      await assertNotClosed(q, [input.holdId]);
       await assertCustomerFree(q, input.phone, [{ start: row.starts_at, end: row.ends_at }], [input.holdId], 1);
       await assertAndStoreConsents(q, input.holdId, input.acks ?? []);
       depositCents = await effectiveDeposit(q, input.holdId, input.phone, row.deposit_cents, stripeEnabled());
@@ -623,6 +712,7 @@ export async function confirmGroup(input: {
         throw new BookingError("CONFLICT", "Dos de tus servicios coinciden en la hora. Cambia uno de ellos.", 409);
       }
     }
+    await assertNotClosed(q, ids);
     await assertCustomerFree(q, input.phone, rows.map((r) => ({ start: r.starts_at, end: r.ends_at })), ids, rows.length);
 
     let totalDeposit = 0;
@@ -787,7 +877,7 @@ export async function suggestAlternatives(code: string, token: string, n = 3): P
   if (row.status !== "CONFIRMED" || !row.future) return [];
   const m = await bookingVisitMetrics(run, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
   const today = todayIn(CONFIG.tz);
-  const rows = await getSlotRows({ from: today, to: addDays(today, Math.min(21, CONFIG.maxDaysAhead)), durationMin: m.duration, bufferMin: m.buffer, stepMin: m.step, staffId: null, excludeBookingId: row.id });
+  const rows = await getSlotRows({ from: today, to: addDays(today, Math.min(21, CONFIG.maxDaysAhead)), durationMin: m.duration, bufferMin: m.buffer, stepMin: m.step, staffId: null, excludeBookingId: row.id, serviceIds: m.serviceIds, pattern: m.pattern });
   const orig = localParts(new Date(row.starts_at).toISOString());
   const free = rows
     .filter((r) => r.available && new Date(r.startsAt).getTime() > Date.now())
@@ -815,11 +905,15 @@ export async function addableServices(code: string, token: string): Promise<Adda
   if (!row) throw new BookingError("NOT_FOUND", "No encontramos esa cita.", 404);
   if (row.status !== "CONFIRMED" || !row.in_time) return [];
   const m = await bookingVisitMetrics(run, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
+  if (m.custom) return []; // una cita con espera o recursos no se alarga desde el móvil: que llame
   const have = ((await query(`SELECT service_id FROM booking_services WHERE booking_id = $1::uuid AND NOT is_addon AND service_id IS NOT NULL`, [row.id])) as unknown as { service_id: number }[]).map((r) => r.service_id);
   if (have.length >= MAX_SERVICES) return [];
   const cands = (await query(
     `SELECT id, name, duration_min, price_cents, buffer_min FROM services
-     WHERE active AND consent_kind IS NULL AND deposit_cents = 0 AND NOT (id = ANY($1::int[])) ORDER BY sort, id`,
+     WHERE active AND consent_kind IS NULL AND deposit_cents = 0 AND NOT (id = ANY($1::int[]))
+       AND NOT EXISTS (SELECT 1 FROM service_phases sp WHERE sp.service_id = services.id AND sp.kind = 'wait')
+       AND NOT EXISTS (SELECT 1 FROM service_resources sr WHERE sr.service_id = services.id)
+     ORDER BY sort, id`,
     [have],
   )) as unknown as { id: number; name: string; duration_min: number; price_cents: number; buffer_min: number }[];
   const day = localParts(new Date(row.starts_at).toISOString()).day;
@@ -827,9 +921,9 @@ export async function addableServices(code: string, token: string): Promise<Adda
   const cache = new Map<string, boolean>();
   const out: AddableService[] = [];
   for (const c of cands) {
-    const key = `${c.duration_min}:${c.buffer_min}`;
+    const key = `${c.id}`;
     if (!cache.has(key)) {
-      const rows = await getSlotRows({ from: day, to: day, durationMin: m.duration + c.duration_min, bufferMin: c.buffer_min, stepMin: m.step, staffId: row.staff_id, excludeBookingId: row.id });
+      const rows = await getSlotRows({ from: day, to: day, durationMin: m.duration + c.duration_min, bufferMin: c.buffer_min, stepMin: m.step, staffId: row.staff_id, excludeBookingId: row.id, serviceIds: [...m.serviceIds, c.id] });
       cache.set(key, rows.some((r) => new Date(r.startsAt).getTime() === start && r.available));
     }
     if (cache.get(key)) out.push({ id: c.id, name: c.name, durationMin: c.duration_min, priceCents: c.price_cents });
@@ -843,6 +937,7 @@ export async function addServiceToBooking(input: { code: string; token: string; 
   const pick = allowed.find((a) => a.id === input.serviceId);
   if (!pick) throw new BookingError("CONFLICT", "Ese servicio ya no se puede añadir a tu cita.", 409);
   const out = await tx(async (q) => {
+    await expireHolds(q);
     const found = (await q(`${EXT_SELECT} WHERE code = $1 AND starts_with(hold_token, $2) FOR UPDATE`, [input.code, tokenOk(input.token) ? input.token : "~invalid~"])) as unknown as ExtRow[];
     const row = found[0];
     if (!row || row.status !== "CONFIRMED" || !row.in_time) throw new BookingError("CONFLICT", "Ya no se puede cambiar esta cita.", 409);
@@ -936,6 +1031,7 @@ export async function rescheduleBooking(input: {
   admin?: boolean;
 }): Promise<{ booking: BookingSummary; old: { startsAt: string; endsAt: string } }> {
   return tx(async (q) => {
+    await expireHolds(q);
     const where = input.bookingId ? `id = $1::uuid` : `code = $1 AND starts_with(hold_token, $2)`;
     const params = input.bookingId ? [input.bookingId] : [input.code ?? "", input.token && tokenOk(input.token) ? input.token : "~invalid~"];
     const found = (await q(
@@ -952,7 +1048,7 @@ export async function rescheduleBooking(input: {
     }
 
     // Duración, limpieza y paso salen de la foto de servicios de la cita (los extras suman duración)
-    const { duration, buffer, step } = await bookingVisitMetrics(q, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
+    const { duration, buffer, step, serviceIds: bookedSvc, pattern: bookedPattern, custom: isCustom } = await bookingVisitMetrics(q, row.id, Math.round((+new Date(row.ends_at) - +new Date(row.starts_at)) / 60000));
 
     const target = new Date(input.startsAt).getTime();
     if (!(target > Date.now())) throw new BookingError("INVALID", "Elige un momento futuro.", 400);
@@ -963,7 +1059,7 @@ export async function rescheduleBooking(input: {
       const today = todayIn(CONFIG.tz);
       if (day < today || day > addDays(today, CONFIG.maxDaysAhead)) throw new BookingError("INVALID", "Esa fecha no se puede reservar.", 400);
       const rows = await getSlotRows(
-        { from: day, to: day, durationMin: duration, bufferMin: buffer, stepMin: step, staffId: null, excludeBookingId: row.id },
+        { from: day, to: day, durationMin: duration, bufferMin: buffer, stepMin: step, staffId: null, excludeBookingId: row.id, serviceIds: bookedSvc, pattern: bookedPattern },
         q,
       );
       const free = rows.filter((r) => r.available && new Date(r.startsAt).getTime() === target);
@@ -976,6 +1072,8 @@ export async function rescheduleBooking(input: {
     }
 
     try {
+      // Con fases o recursos los bloques los escribe la aplicación: se quitan los antiguos y se ponen los nuevos (si no caben, todo se deshace)
+      if (isCustom) await q(`DELETE FROM booking_blocks WHERE booking_id = $1::uuid`, [row.id]);
       await q(
         `UPDATE bookings
            SET staff_id = $2::int, starts_at = $3::timestamptz,
@@ -987,6 +1085,10 @@ export async function rescheduleBooking(input: {
          WHERE id = $1::uuid`,
         [row.id, staffId, input.startsAt, duration, CONFIG.tz, REMINDER_HOURS, duration + buffer],
       );
+      if (isCustom) {
+        const units = await pickUnits(q, bookedPattern, new Date(input.startsAt), row.id);
+        await writeBlocks(q, row.id, bookedPattern, new Date(input.startsAt), staffId, units);
+      }
     } catch (e) {
       if (isExclusionViolation(e)) throw new BookingError("SLOT_TAKEN", "Ese hueco ya está ocupado.", 409);
       throw e;
@@ -1026,10 +1128,26 @@ export async function markAttendance(
       const dVisit = (value === "SHOWED" ? 1 : 0) - (row.attendance === "SHOWED" ? 1 : 0);
       const c = (await q(
         `UPDATE customers SET no_show_count = GREATEST(0, no_show_count + $2::int), visit_count = GREATEST(0, visit_count + $3::int)
-         WHERE id = $1::bigint RETURNING no_show_count`,
+         WHERE id = $1::bigint RETURNING no_show_count, visit_count, referred_by, referral_awarded_at`,
         [row.customer_id, dNo, dVisit],
-      )) as unknown as { no_show_count: number }[];
+      )) as unknown as { no_show_count: number; visit_count: number; referred_by: number | null; referral_awarded_at: Date | null }[];
       count = c[0]?.no_show_count ?? null;
+      // Profesional habitual: la más frecuente de sus últimas 5 visitas
+      await q(
+        `UPDATE customers SET preferred_staff_id = (
+           SELECT staff_id FROM (
+             SELECT staff_id, count(*) AS n, max(starts_at) AS last FROM (
+               SELECT staff_id, starts_at FROM bookings WHERE customer_id = $1::bigint AND attendance = 'SHOWED' ORDER BY starts_at DESC LIMIT 5
+             ) r GROUP BY staff_id ORDER BY n DESC, last DESC LIMIT 1
+           ) z)
+         WHERE id = $1::bigint`,
+        [row.customer_id],
+      );
+      // «Trae a una amiga»: cuando la amiga viene por primera vez, las dos ganan su premio (una sola vez)
+      if (value === "SHOWED" && c[0]?.referred_by && !c[0].referral_awarded_at) {
+        await q(`UPDATE customers SET referral_awarded_at = now(), referral_rewards = referral_rewards + 1 WHERE id = $1::bigint`, [row.customer_id]);
+        await q(`UPDATE customers SET referral_rewards = referral_rewards + 1 WHERE id = $1::bigint`, [c[0].referred_by]);
+      }
     }
     // La señal se pierde si no vino; si se corrige, vuelve a "pagada"
     if (value === "NO_SHOW" && row.deposit_status === "PAID") {
@@ -1122,16 +1240,17 @@ export async function createManualBooking(input: {
   notes?: string | null;
 }): Promise<string> {
   return tx(async (q) => {
+    await expireHolds(q);
     const visit = await loadVisit([input.serviceId], q);
     try {
       const rows = (await q(
         `INSERT INTO bookings (staff_id, service_id, starts_at, ends_at, blocked_until, status, hold_token, code,
-                               customer_name, customer_phone, notes, source, confirmed_at, remind_at)
+                               customer_name, customer_phone, notes, source, confirmed_at, remind_at, custom_blocks)
          SELECT $1::int, $2::int, t.s, t.s + make_interval(mins => $3::int), t.s + make_interval(mins => $4::int),
                 'CONFIRMED', $5, $6, $7, $8, $9, 'admin', now(),
-                ${remindAtSql("t.s", "$12::text", "$13::int")}
+                ${remindAtSql("t.s", "$12::text", "$13::int")}, $14::boolean
          FROM (SELECT (($10::date + $11::time) AT TIME ZONE $12::text) AS s) t
-         RETURNING id`,
+         RETURNING id, starts_at`,
         [
           input.staffId,
           input.serviceId,
@@ -1146,15 +1265,20 @@ export async function createManualBooking(input: {
           input.time,
           CONFIG.tz,
           REMINDER_HOURS,
+          visit.pattern.complex,
         ],
-      )) as unknown as { id: string }[];
+      )) as unknown as { id: string; starts_at: Date }[];
       const id = rows[0].id;
       const it = visit.items[0];
       await q(
-        `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min)
-         VALUES ($1::uuid, $2::int, 0, $3, $4::int, $5::int, 0, $6::int)`,
-        [id, it.id, it.name, it.durationMin, it.priceCents, it.bufferMin],
+        `INSERT INTO booking_services (booking_id, service_id, position, name, duration_min, price_cents, deposit_cents, buffer_min, phases, resource_reqs)
+         VALUES ($1::uuid, $2::int, 0, $3, $4::int, $5::int, 0, $6::int, $7::jsonb, $8::jsonb)`,
+        [id, it.id, it.name, it.durationMin, it.priceCents, it.bufferMin, it.phases.length ? JSON.stringify(it.phases) : null, it.resources.length ? JSON.stringify(it.resources) : null],
       );
+      if (visit.pattern.complex) {
+        const start = new Date(rows[0].starts_at);
+        await writeBlocks(q, id, visit.pattern, start, input.staffId, await pickUnits(q, visit.pattern, start));
+      }
       await linkCustomer(q, id);
       return id;
     } catch (e) {

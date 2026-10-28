@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { after } from "next/server";
 import { redirect } from "next/navigation";
 import { z } from "zod";
+import { audit } from "@/lib/audit";
 import { isAdmin, loginAdmin, logoutAdmin } from "@/lib/auth";
 import { addTimeOff, adminCancel, BookingError, closeDay, createManualBooking, getSummaryById, markAttendance, removeTimeOff, rescheduleBooking } from "@/lib/bookings";
 import { notifyCancelledByCentre, notifyDayClosed, notifyOwnerRepeatOffender, notifyRescheduled } from "@/lib/notify";
@@ -14,16 +15,18 @@ import { offerDay, offerFreedSlot } from "@/lib/waitlist";
 import { isDay } from "@/lib/dates";
 import { CONFIG } from "@/lib/config";
 
-async function guard() {
+async function guard(action?: string) {
   if (!(await isAdmin())) redirect("/admin");
+  if (action && !READ_ONLY.has(action)) await audit(action);
 }
+const READ_ONLY = new Set<string>([]);
 const str = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
 const back = (day: string, err?: string) =>
   redirect(`/admin?d=${day}${err ? `&err=${encodeURIComponent(err)}` : ""}`);
 
 export async function login(fd: FormData) {
-  const ok = await loginAdmin(str(fd, "password"));
-  redirect(ok ? "/admin" : "/admin?err=Contraseña%20incorrecta");
+  const r = await loginAdmin(str(fd, "password"));
+  redirect(r.ok ? "/admin" : `/admin?err=${encodeURIComponent(r.error ?? "Contraseña incorrecta")}`);
 }
 
 export async function logout() {
@@ -32,7 +35,7 @@ export async function logout() {
 }
 
 export async function cancelBookingAction(fd: FormData) {
-  await guard();
+  await guard("cancelBookingAction");
   const id = z.string().uuid().parse(str(fd, "id"));
   const before = await getSummaryById(id);
   await adminCancel(id);
@@ -47,7 +50,7 @@ export async function cancelBookingAction(fd: FormData) {
 }
 
 export async function createManualAction(fd: FormData) {
-  await guard();
+  await guard("createManualAction");
   const day = str(fd, "day");
   let error: string | undefined;
   try {
@@ -79,7 +82,7 @@ export async function createManualAction(fd: FormData) {
 }
 
 export async function addTimeOffAction(fd: FormData) {
-  await guard();
+  await guard("addTimeOffAction");
   const day = str(fd, "day");
   let error: string | undefined;
   try {
@@ -104,7 +107,7 @@ export async function addTimeOffAction(fd: FormData) {
  * un enlace para elegir otra hora (con 3 propuestas) o cancelar sin coste (si pagó señal, se le devuelve).
  */
 export async function closeDayAction(fd: FormData) {
-  await guard();
+  await guard("closeDayAction");
   const day = str(fd, "day");
   if (!isDay(day)) back("", "Fecha no válida.");
   if (fd.get("confirm") !== "on") back(day, "Marca la casilla para confirmar que quieres cerrar el día.");
@@ -124,14 +127,14 @@ export async function closeDayAction(fd: FormData) {
 }
 
 export async function removeTimeOffAction(fd: FormData) {
-  await guard();
+  await guard("removeTimeOffAction");
   await removeTimeOff(Number(str(fd, "id")));
   revalidatePath("/admin");
   back(str(fd, "day"));
 }
 
 export async function removeWaitlistAction(fd: FormData) {
-  await guard();
+  await guard("removeWaitlistAction");
   const id = z.string().uuid().parse(str(fd, "id"));
   await query(`UPDATE waitlist SET status = 'CANCELLED' WHERE id = $1::uuid`, [id]);
   revalidatePath("/admin");
@@ -139,7 +142,7 @@ export async function removeWaitlistAction(fd: FormData) {
 }
 
 export async function doneCallbackAction(fd: FormData) {
-  await guard();
+  await guard("doneCallbackAction");
   await query(`UPDATE callbacks SET status = 'DONE' WHERE id = $1::bigint`, [z.coerce.number().int().positive().parse(str(fd, "id"))]);
   revalidatePath("/admin");
   back(str(fd, "day"));
@@ -148,7 +151,7 @@ export async function doneCallbackAction(fd: FormData) {
 /* ---------- Fase 2: asistencia, cambio de hora, señal y fichas ---------- */
 
 export async function attendanceAction(fd: FormData) {
-  await guard();
+  await guard("attendanceAction");
   const id = z.string().uuid().parse(str(fd, "id"));
   const v = z.enum(["SHOWED", "NO_SHOW", "CLEAR"]).parse(str(fd, "value"));
   let error: string | undefined;
@@ -166,7 +169,7 @@ export async function attendanceAction(fd: FormData) {
 }
 
 export async function adminRescheduleAction(fd: FormData) {
-  await guard();
+  await guard("adminRescheduleAction");
   const id = z.string().uuid().parse(str(fd, "id"));
   let error: string | undefined;
   try {
@@ -188,7 +191,7 @@ export async function adminRescheduleAction(fd: FormData) {
 }
 
 export async function refundDepositAction(fd: FormData) {
-  await guard();
+  await guard("refundDepositAction");
   const id = z.string().uuid().parse(str(fd, "id"));
   const r = await settleDeposit(id, "refund");
   revalidatePath("/admin");
@@ -196,7 +199,7 @@ export async function refundDepositAction(fd: FormData) {
 }
 
 export async function saveCustomerNotesAction(fd: FormData) {
-  await guard();
+  await guard("saveCustomerNotesAction");
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   await query(`UPDATE customers SET notes = $2 WHERE id = $1::bigint`, [id, str(fd, "notes").slice(0, 2000) || null]);
   revalidatePath(`/admin/clientas/${id}`);
@@ -205,7 +208,7 @@ export async function saveCustomerNotesAction(fd: FormData) {
 
 /** «Ofrecer a la lista»: avisa a quienes esperan de que hay huecos libres ese día (por orden de llegada, solo si les cabe su servicio). */
 export async function offerDayAction(fd: FormData) {
-  await guard();
+  await guard("offerDayAction");
   const day = str(fd, "day");
   if (!isDay(day)) redirect("/admin");
   let n = 0;
@@ -220,7 +223,7 @@ export async function offerDayAction(fd: FormData) {
 
 /** Canjea un premio de fidelidad (solo si tiene alguno pendiente): la tarjeta vuelve a empezar. */
 export async function redeemLoyaltyAction(fd: FormData) {
-  await guard();
+  await guard("redeemLoyaltyAction");
   const id = Number(str(fd, "id"));
   if (!Number.isInteger(id) || id <= 0) redirect("/admin/clientas");
   const l = await getLoyalty();
@@ -230,4 +233,16 @@ export async function redeemLoyaltyAction(fd: FormData) {
   );
   revalidatePath(`/admin/clientas/${id}`);
   redirect(`/admin/clientas/${id}?ok=${encodeURIComponent(r.length ? `Premio canjeado: ${l.reward}.` : "No tiene premios pendientes.")}`);
+}
+
+export async function redeemReferralAction(fd: FormData) {
+  await guard("redeemReferralAction");
+  const id = Number(str(fd, "id"));
+  if (!Number.isInteger(id) || id <= 0) redirect("/admin/clientas");
+  const r = await query<{ id: number }>(
+    `UPDATE customers SET referral_redeemed = referral_redeemed + 1 WHERE id = $1::bigint AND referral_rewards > referral_redeemed RETURNING id`,
+    [id],
+  );
+  revalidatePath(`/admin/clientas/${id}`);
+  redirect(`/admin/clientas/${id}?ok=${encodeURIComponent(r.length ? "Premio por amiga canjeado." : "No tiene premios por amigas pendientes.")}`);
 }

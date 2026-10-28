@@ -2,7 +2,7 @@ import { query } from "./db";
 import { derivedSecret } from "./secrets";
 import { phoneDigits, siteUrl } from "./site";
 
-export type Channel = "whatsapp" | "sms" | "email" | "telegram";
+export type Channel = "whatsapp" | "sms" | "email" | "telegram" | "dev";
 export type SendResult = { ok: boolean; detail?: string; providerId?: string };
 
 const env = (k: string) => process.env[k] ?? "";
@@ -14,6 +14,9 @@ export const enabled = {
   whatsapp: () => !!env("WHATSAPP_TOKEN") && !!env("WHATSAPP_PHONE_NUMBER_ID"),
   telegram: () => !!env("TELEGRAM_BOT_TOKEN") && !!env("TELEGRAM_CHAT_ID"),
 };
+
+/** En local, sin ningún canal configurado, los mensajes no salen: se anotan como «simulados» para poder verlos en /admin/bandeja. */
+export const devMode = () => (process.env.NODE_ENV !== "production" || process.env.DEMO_MODE === "on") && !enabled.sms() && !enabled.whatsapp() && !enabled.email();
 
 export async function logSend(
   bookingId: string | null,

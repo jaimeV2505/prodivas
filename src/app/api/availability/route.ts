@@ -6,7 +6,9 @@ import { getCapacity, getSlotRows, groupSlots } from "@/lib/availability";
 import { BookingError, bookingVisitMetrics, getBookingByCode } from "@/lib/bookings";
 import { query, run } from "@/lib/db";
 import { loadVisit } from "@/lib/visit";
-import { respond } from "@/lib/http";
+import { clientIp, respond } from "@/lib/http";
+import { hashIp } from "@/lib/bookings";
+import { limit } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
@@ -31,13 +33,14 @@ const Params = z.object({
 
 export async function GET(req: NextRequest) {
   return respond(async () => {
+    await limit(`avail:${hashIp(clientIp(req))}`, 150, 60, "Vas muy rápido. Espera unos segundos.");
     const p = Params.parse(Object.fromEntries(req.nextUrl.searchParams));
     const ids = p.serviceIds ? p.serviceIds.split(",").map(Number) : p.serviceId ? [p.serviceId] : [];
     if (!ids.length) throw new BookingError("INVALID", "Falta el servicio.", 400);
     const addonIds = p.addonIds ? p.addonIds.split(",").map(Number) : [];
     const visit = await loadVisit(ids, run, addonIds);
     let excludeBookingId: string | null = null;
-    let metrics = { duration: visit.durationMin, buffer: visit.bufferMin, step: visit.stepMin };
+    let metrics: { duration: number; buffer: number; step: number; serviceIds: number[]; pattern: import("@/lib/blocks").Pattern } = { duration: visit.durationMin, buffer: visit.bufferMin, step: visit.stepMin, serviceIds: visit.items.map((i) => i.id), pattern: visit.pattern };
     if (p.exclude && p.t) {
       const bk = await getBookingByCode(p.exclude.toUpperCase(), p.t);
       if (bk && bk.status === "CONFIRMED") {
@@ -69,8 +72,10 @@ export async function GET(req: NextRequest) {
         stepMin: metrics.step,
         staffId: p.staffId ?? null,
         excludeBookingId,
+        serviceIds: metrics.serviceIds,
+        pattern: metrics.pattern,
       }),
-      getCapacity({ from, to, durationMin: metrics.duration, bufferMin: metrics.buffer, staffId: p.staffId ?? null }),
+      getCapacity({ from, to, durationMin: metrics.duration, bufferMin: metrics.buffer, staffId: p.staffId ?? null, serviceIds: metrics.serviceIds, pattern: metrics.pattern, stepMin: metrics.step }),
     ]);
     return { slots: groupSlots(rows), capacity };
   });

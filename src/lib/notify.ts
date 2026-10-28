@@ -4,7 +4,7 @@ import { fmtLong, fmtPrice } from "./format";
 import { fill } from "./i18n";
 import { msg } from "./i18n/msg";
 import type { BookingSummary } from "./bookings";
-import { enabled, logSend, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type Channel, type SendResult } from "./messaging";
+import { devMode, enabled, logSend, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type Channel, type SendResult } from "./messaging";
 import { gsm, manageLink, siteUrl } from "./site";
 
 const esc = (s: string) =>
@@ -72,6 +72,10 @@ async function toPerson(p: Person, kind: string, msg: Msg, opts: { optional?: bo
   }
   if (p.email && enabled.email()) {
     ok = (await run(p.bookingId, kind, "email", () => sendEmail([p.email!], msg.email.subject, msg.email.html))) || ok;
+  }
+  // Local sin canales: se anota el mensaje simulado (se ve en /admin/bandeja) y cuenta como enviado
+  if (!ok && devMode() && (p.phone || p.email)) {
+    ok = await run(p.bookingId, kind, "dev", async () => ({ ok: true, detail: `→ ${p.phone ?? p.email}: ${msg.sms}` }));
   }
   return ok;
 }
@@ -248,9 +252,9 @@ export async function notifyAftercare(b: BookingSummary, care: string | null, op
 }
 
 /** «Toca retoque»: unos días antes de que se cumplan las semanas del servicio. Mensaje opcional (con baja). */
-export async function notifyRebookNudge(b: BookingSummary, serviceName: string, weeks: number, optout: string): Promise<boolean> {
+export async function notifyRebookNudge(b: BookingSummary, serviceName: string, weeks: number, optout: string, linkOverride?: string): Promise<boolean> {
   const m = msg;
-  const link = `${siteUrl()}/reservar`;
+  const link = linkOverride ?? `${siteUrl()}/reservar`;
   const name = b.customerName ?? "";
   return toCustomer(
     b,
@@ -263,6 +267,39 @@ export async function notifyRebookNudge(b: BookingSummary, serviceName: string, 
         html:
           mailShell(m.rtTitle, `<p>${esc(fill(m.rtBody, { name, weeks, service: serviceName }))}</p>`, [{ label: m.rtButton, href: link, primary: true }]) +
           `<p style="font-size:13px;color:#6b4a60">${esc(fill(m.optoutLine, { link: optout }))}</p>`,
+      },
+    },
+    { optional: true },
+  );
+}
+
+/** Reserva dejada a medias: se escribe UNA vez con un enlace para retomarla (no es publicidad, es la propia reserva de la clienta). */
+export async function notifyAbandoned(p: { name: string | null; phone: string; whenIso: string | null; service: string; link: string }): Promise<boolean> {
+  const m = msg;
+  const name = p.name?.split(" ")[0] || "";
+  const when = p.whenIso ? whenWords(p.whenIso) : "esta semana";
+  return toPerson({ bookingId: null, phone: p.phone, email: null }, "abandoned", {
+    sms: fill(m.abSms, { name, service: p.service, when, link: p.link }),
+    wa: waIn("WA_TEMPLATE_ABANDON", null, [name, p.service, when], [{ kind: "url", suffix: p.link.replace(siteUrl() + "/", "") }]),
+    email: { subject: fill(m.abSubject, { salon: salon() }), html: mailShell(m.abTitle, `<p>${esc(fill(m.abBody, { name, service: p.service, when }))}</p>`, [{ label: m.abButton, href: p.link, primary: true }]) },
+  });
+}
+
+/** «Te echamos de menos»: mensaje opcional a clientas que llevan semanas sin venir (con baja). */
+export async function notifyReactivation(p: { name: string; phone: string; email: string | null; service: string; weeks: number; link: string; optout: string }): Promise<boolean> {
+  const m = msg;
+  const name = p.name.split(" ")[0];
+  return toPerson(
+    { bookingId: null, phone: p.phone, email: p.email },
+    "reactivation",
+    {
+      sms: fill(m.missSms, { name, service: p.service, link: p.link }) + ` ${fill(m.optoutSms, { link: p.optout })}`,
+      wa: waIn("WA_TEMPLATE_REACTIVATE", null, [name, p.service, String(p.weeks)], []),
+      email: {
+        subject: fill(m.missSubject, { salon: salon() }),
+        html:
+          mailShell(m.missTitle, `<p>${esc(fill(m.missBody, { name, service: p.service, weeks: p.weeks }))}</p>`, [{ label: m.missButton, href: p.link, primary: true }]) +
+          `<p style="font-size:13px;color:#6b4a60">${esc(fill(m.optoutLine, { link: p.optout }))}</p>`,
       },
     },
     { optional: true },

@@ -513,7 +513,8 @@ try {
       const extra = (await db.query(`INSERT INTO staff (name, sort, active) VALUES ('E2E Staff', 99, true) RETURNING id`)).rows[0].id;
       try {
         const base = slotsA.find((x) => x.day !== l1?.day) ?? slotsA[1];
-        const p1 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: null, startsAt: base.startsAt } });
+        const mainStaff = (await db.query(`SELECT id FROM staff WHERE id <> $1 AND active ORDER BY sort, id LIMIT 1`, [extra])).rows[0].id;
+        const p1 = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: mainStaff, startsAt: base.startsAt } });
         const c1 = await api("/api/bookings", { method: "POST", body: { holdId: p1.json?.holdId, holdToken: p1.json?.holdToken, name: "E2E Test", phone: "600000007" } });
         const sameTime = (await slotsFor(A.id, base.day)).find((x) => x.startsAt === base.startsAt);
         const withOther = (await api(`/api/availability?serviceIds=${A.id}&from=${base.day}&to=${base.day}&staffId=${extra}`)).json?.slots?.find((x) => x.startsAt === base.startsAt);
@@ -844,7 +845,7 @@ try {
       const slB = await free([A.id], 4);
       if (slB) {
         const h = await api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceIds: [A.id], staffId: null, startsAt: slB.startsAt } });
-        const c = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000014" } });
+        const c = await api("/api/bookings", { method: "POST", body: { holdId: h.json?.holdId, holdToken: h.json?.holdToken, name: "E2E Test", phone: "600000015" } });
         const b = c.json?.booking;
         if (!b) check(false, "se pudo crear una cita para probar «añadir un servicio»", JSON.stringify(c.json));
         else {
@@ -868,7 +869,9 @@ try {
 
     /* 4 -------------------------------------------------------------- */
     section("4. Carrera: seis personas pulsan el mismo hueco a la vez");
-    const target = free[1];
+    // el hueco se pide de nuevo: tras tantas pruebas, el calculado al principio puede haberse ocupado
+    const fresh = ((await api(`/api/availability?serviceIds=${A.id}&from=${addDays(from, 4)}&to=${addDays(from, 12)}`)).json?.slots ?? []).filter((x) => x.available);
+    const target = fresh[1] ?? free[1];
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
         api("/api/holds", { method: "POST", ip: freshIp(), body: { serviceId: A.id, staffId: null, startsAt: target.startsAt } }),
@@ -880,9 +883,10 @@ try {
     for (const w of winners) await api(`/api/holds/${w.json.holdId}?token=${w.json.holdToken}`, { method: "DELETE" });
   }
 } finally {
-  await db.query(`DELETE FROM bookings WHERE customer_name = 'E2E Test'`);
+  await db.query(`DELETE FROM bookings WHERE customer_name IN ('E2E Test', 'Ana Cedida') OR customer_phone LIKE '6000000%'`);
+  await db.query(`DELETE FROM leads WHERE phone_key LIKE '6000000%'`);
   await db.query(`DELETE FROM waitlist WHERE name = 'E2E Test'`);
-  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007','600000008','600000009','600000010','600000011','600000012','600000013','600000014')`);
+  await db.query(`DELETE FROM customers WHERE phone_key IN ('600000000','600000001','600000002','600000003','600000004','600000005','600000006','600000007','600000008','600000009','600000010','600000011','600000012','600000013','600000014','600000015')`);
   await db.end();
 }
 

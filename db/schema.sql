@@ -451,3 +451,225 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS loyalty_redeemed int NOT NULL DEF
 INSERT INTO settings (key, value) VALUES ('loyalty_enabled', 'off') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('loyalty_every', '10') ON CONFLICT (key) DO NOTHING;
 INSERT INTO settings (key, value) VALUES ('loyalty_reward', 'una manicura clásica gratis') ON CONFLICT (key) DO NOTHING;
+
+-- =====================================================================
+-- BLINDAJE · EMBUDO MEDIBLE · CRECIMIENTO · HABILIDADES
+-- =====================================================================
+
+-- Límite de peticiones por clave (IP, teléfono…) sin depender de memoria: vale para serverless
+CREATE TABLE IF NOT EXISTS rate_hits (
+  id  bigserial PRIMARY KEY,
+  key text NOT NULL,
+  at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rate_hits_key_idx ON rate_hits (key, at DESC);
+
+-- Quién cambió qué en el panel
+CREATE TABLE IF NOT EXISTS audit_log (
+  id     bigserial PRIMARY KEY,
+  at     timestamptz NOT NULL DEFAULT now(),
+  actor  text NOT NULL DEFAULT 'admin',
+  action text NOT NULL,
+  target text,
+  detail text
+);
+CREATE INDEX IF NOT EXISTS audit_log_at_idx ON audit_log (at DESC);
+
+-- Verificación del teléfono por código (SMS/WhatsApp). Solo se guarda el hash del código.
+CREATE TABLE IF NOT EXISTS phone_otps (
+  id         bigserial PRIMARY KEY,
+  phone_key  text NOT NULL,
+  code_hash  text NOT NULL,
+  expires_at timestamptz NOT NULL,
+  attempts   int NOT NULL DEFAULT 0,
+  used_at    timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS phone_otps_phone_idx ON phone_otps (phone_key, created_at DESC);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS verified_at timestamptz;  -- teléfono verificado al menos una vez
+
+-- Embudo: un evento por paso, con la sesión anónima y de dónde viene (UTM)
+CREATE TABLE IF NOT EXISTS funnel_events (
+  id            bigserial PRIMARY KEY,
+  session_id    text NOT NULL,
+  event         text NOT NULL,   -- landing | service | slots | hold | details | lead | confirmed | abandoned
+  flow          text,            -- full | easy | hero
+  service_slugs text,
+  utm_source    text,
+  utm_medium    text,
+  utm_campaign  text,
+  referrer      text,
+  device        text,            -- mobile | desktop
+  meta          jsonb,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS funnel_events_at_idx ON funnel_events (created_at DESC);
+CREATE INDEX IF NOT EXISTS funnel_events_session_idx ON funnel_events (session_id, created_at);
+CREATE INDEX IF NOT EXISTS funnel_events_event_idx ON funnel_events (event, created_at DESC);
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS session_id   text;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS utm_source   text;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS utm_medium   text;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS utm_campaign text;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_code text;
+
+-- Contacto dejado ANTES de confirmar: si no acaba, se le escribe una vez para recuperar la reserva
+CREATE TABLE IF NOT EXISTS leads (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  hold_id       uuid,
+  session_id    text,
+  name          text,
+  phone         text NOT NULL,
+  phone_key     text NOT NULL,
+  service_ids   int[] NOT NULL,
+  service_label text,
+  starts_at     timestamptz,
+  flow          text NOT NULL DEFAULT 'full',
+  utm_source    text,
+  status        text NOT NULL DEFAULT 'NEW' CHECK (status IN ('NEW','MESSAGED','BOOKED','EXPIRED')),
+  messaged_at   timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS leads_hold_idx ON leads (hold_id) WHERE hold_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS leads_status_idx ON leads (status, created_at);
+CREATE INDEX IF NOT EXISTS leads_phone_idx ON leads (phone_key);
+
+-- Crecimiento: referidos y reactivación
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_code       text;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS referred_by         bigint REFERENCES customers(id);
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_rewards    int NOT NULL DEFAULT 0;   -- premios ganados por traer amigas
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_redeemed   int NOT NULL DEFAULT 0;   -- premios ya canjeados
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS last_reactivation_at timestamptz;
+CREATE UNIQUE INDEX IF NOT EXISTS customers_referral_idx ON customers (referral_code) WHERE referral_code IS NOT NULL;
+
+-- Habilidades: qué servicios hace cada profesional (sin filas = hace todos)
+CREATE TABLE IF NOT EXISTS staff_services (
+  staff_id   int NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+  service_id int NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  PRIMARY KEY (staff_id, service_id)
+);
+
+INSERT INTO settings (key, value) VALUES ('auto_showed', 'on')          ON CONFLICT (key) DO NOTHING;  -- «Vino» automático si no se marca otra cosa
+INSERT INTO settings (key, value) VALUES ('abandon_recovery', 'on')     ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('reactivation_days', '75')    ON CONFLICT (key) DO NOTHING;  -- 0 = desactivada
+INSERT INTO settings (key, value) VALUES ('referral_reward', 'un extra gratis (nail art o parafina)') ON CONFLICT (key) DO NOTHING;
+INSERT INTO settings (key, value) VALUES ('referral_enabled', 'on')     ON CONFLICT (key) DO NOTHING;
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_awarded_at timestamptz;
+
+-- =====================================================================
+-- FASES DE POSE · RECURSOS COMPARTIDOS · PROFESIONAL HABITUAL
+-- (diseño en docs/DISENO-FASES-Y-RECURSOS.md)
+-- =====================================================================
+
+-- Fases de un servicio: actúa (active) / espera (wait). La suma = services.duration_min. Sin filas = una sola fase activa.
+CREATE TABLE IF NOT EXISTS service_phases (
+  service_id int NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  position   int NOT NULL,
+  kind       text NOT NULL CHECK (kind IN ('active','wait')),
+  minutes    int NOT NULL CHECK (minutes > 0),
+  PRIMARY KEY (service_id, position)
+);
+
+-- Recursos: unidades individuales y exclusivas (cabina láser 1, lavacabezas 2…) agrupadas por tipo
+CREATE TABLE IF NOT EXISTS resources (
+  id     serial PRIMARY KEY,
+  name   text NOT NULL,
+  kind   text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  sort   int NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS service_resources (
+  service_id int  NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  kind       text NOT NULL,
+  uses       text NOT NULL DEFAULT 'all' CHECK (uses IN ('all','active')),  -- toda la cita o solo las fases en que actúa la profesional
+  PRIMARY KEY (service_id, kind)
+);
+
+-- Foto de las fases y recursos de cada servicio en el momento de reservar (si luego cambias el servicio, la cita no se mueve)
+ALTER TABLE booking_services ADD COLUMN IF NOT EXISTS phases jsonb;
+ALTER TABLE booking_services ADD COLUMN IF NOT EXISTS resource_reqs jsonb;
+-- true = los bloques de esta cita los escribe la aplicación (fases o recursos); false = el trigger crea su único bloque
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS custom_blocks boolean NOT NULL DEFAULT false;
+
+-- Bloques que ocupan de verdad: aquí vive el candado
+CREATE TABLE IF NOT EXISTS booking_blocks (
+  id          bigserial PRIMARY KEY,
+  booking_id  uuid NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  staff_id    int REFERENCES staff(id),
+  resource_id int REFERENCES resources(id),
+  during      tstzrange NOT NULL,
+  live        boolean NOT NULL,
+  CHECK ((staff_id IS NULL) <> (resource_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS booking_blocks_booking_idx ON booking_blocks (booking_id);
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'blocks_staff_no_overlap') THEN
+    ALTER TABLE booking_blocks ADD CONSTRAINT blocks_staff_no_overlap EXCLUDE USING gist (staff_id WITH =, during WITH &&) WHERE (live AND staff_id IS NOT NULL);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'blocks_resource_no_overlap') THEN
+    ALTER TABLE booking_blocks ADD CONSTRAINT blocks_resource_no_overlap EXCLUDE USING gist (resource_id WITH =, during WITH &&) WHERE (live AND resource_id IS NOT NULL);
+  END IF;
+END $$;
+
+-- Mantiene los bloques de las citas simples sincronizados con la cita (estado, hora, profesional).
+-- Las citas con fases o recursos (custom_blocks) llevan sus bloques escritos por la aplicación; el trigger solo sigue su estado.
+CREATE OR REPLACE FUNCTION bookings_sync_blocks() RETURNS trigger AS $$
+DECLARE
+  live_new boolean := NEW.status IN ('HOLD','CONFIRMED');
+  n int;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NOT NEW.custom_blocks THEN
+      INSERT INTO booking_blocks (booking_id, staff_id, during, live)
+      VALUES (NEW.id, NEW.staff_id, tstzrange(NEW.starts_at, NEW.blocked_until, '[)'), live_new);
+    END IF;
+    RETURN NULL;
+  END IF;
+  IF NOT NEW.custom_blocks THEN
+    IF NEW.starts_at <> OLD.starts_at OR NEW.blocked_until <> OLD.blocked_until OR NEW.staff_id <> OLD.staff_id OR NEW.status <> OLD.status THEN
+      UPDATE booking_blocks SET staff_id = NEW.staff_id, during = tstzrange(NEW.starts_at, NEW.blocked_until, '[)'), live = live_new
+       WHERE booking_id = NEW.id;
+      GET DIAGNOSTICS n = ROW_COUNT;
+      IF n = 0 THEN
+        INSERT INTO booking_blocks (booking_id, staff_id, during, live)
+        VALUES (NEW.id, NEW.staff_id, tstzrange(NEW.starts_at, NEW.blocked_until, '[)'), live_new);
+      END IF;
+    END IF;
+  ELSIF NEW.status <> OLD.status THEN
+    UPDATE booking_blocks SET live = live_new WHERE booking_id = NEW.id;
+  END IF;
+  RETURN NULL;
+END $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS bookings_blocks ON bookings;
+CREATE TRIGGER bookings_blocks AFTER INSERT OR UPDATE ON bookings FOR EACH ROW EXECUTE FUNCTION bookings_sync_blocks();
+
+-- Relleno: un bloque idéntico al de hoy para cada cita que aún no tenga
+INSERT INTO booking_blocks (booking_id, staff_id, during, live)
+SELECT b.id, b.staff_id, tstzrange(b.starts_at, b.blocked_until, '[)'), b.status IN ('HOLD','CONFIRMED')
+FROM bookings b
+WHERE NOT b.custom_blocks AND NOT EXISTS (SELECT 1 FROM booking_blocks x WHERE x.booking_id = b.id);
+
+-- El candado antiguo (toda la cita de una profesional) deja de aplicarse a las citas con fases: allí mandan los bloques
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'bookings_no_overlap_v3') THEN
+    ALTER TABLE bookings DROP CONSTRAINT IF EXISTS bookings_no_overlap_v2;
+    ALTER TABLE bookings ADD CONSTRAINT bookings_no_overlap_v3 EXCLUDE USING gist (
+      staff_id WITH =,
+      tstzrange(starts_at, blocked_until, '[)') WITH &&
+    ) WHERE (status IN ('HOLD','CONFIRMED') AND NOT custom_blocks);
+  END IF;
+END $$;
+
+-- Profesional habitual (la más frecuente de sus últimas visitas)
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS preferred_staff_id int REFERENCES staff(id) ON DELETE SET NULL;
+UPDATE customers c SET preferred_staff_id = x.staff_id
+FROM (
+  SELECT DISTINCT ON (customer_id) customer_id, staff_id FROM (
+    SELECT customer_id, staff_id, count(*) AS n, max(starts_at) AS last
+    FROM (SELECT customer_id, staff_id, starts_at, row_number() OVER (PARTITION BY customer_id ORDER BY starts_at DESC) AS rn
+          FROM bookings WHERE customer_id IS NOT NULL AND attendance = 'SHOWED') r
+    WHERE rn <= 5 GROUP BY customer_id, staff_id
+  ) t ORDER BY customer_id, n DESC, last DESC
+) x
+WHERE c.id = x.customer_id AND c.preferred_staff_id IS NULL;

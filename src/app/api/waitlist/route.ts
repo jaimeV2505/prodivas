@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fmtDayLabel } from "@/lib/format";
 import { BookingError, hashIp } from "@/lib/bookings";
 import { clientIp, respond } from "@/lib/http";
+import { limit } from "@/lib/ratelimit";
 import { notifyOwnerWaitlistJoined } from "@/lib/notify";
 import { isDay } from "@/lib/dates";
 import { joinWaitlist } from "@/lib/waitlist";
@@ -25,6 +26,7 @@ export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
     if (b.website) throw new BookingError("INVALID", "No hemos podido procesar la solicitud.");
+    await limit(`waitlist:${hashIp(clientIp(req))}`, 10, 3600, "Ya te hemos apuntado a varios avisos. Llámanos y lo vemos juntas.");
     const r = await joinWaitlist({
       serviceIds: b.serviceIds ?? [b.serviceId!],
       day: b.day ?? null,

@@ -1,5 +1,6 @@
 "use client";
 
+import { VIDEOS } from "@/lib/videos.generated";
 import { useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "framer-motion";
 import { STILLS } from "@/lib/media";
@@ -20,6 +21,7 @@ export default function MediaSlot({ name, variant, className = "" }: Props) {
   const still = STILLS[name];
 
   useEffect(() => {
+    if (!VIDEOS.includes(name)) return; // no hay vídeo: ni se pregunta (sin errores 404)
     let off = false;
     fetch(src, { method: "HEAD" })
       .then((r) => !off && setExists(r.ok && (r.headers.get("content-type") ?? "").includes("video")))
@@ -27,7 +29,7 @@ export default function MediaSlot({ name, variant, className = "" }: Props) {
     return () => {
       off = true;
     };
-  }, [src]);
+  }, [src, name]);
 
   useEffect(() => {
     const v = ref.current;

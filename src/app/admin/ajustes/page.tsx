@@ -11,11 +11,17 @@ import { query } from "@/lib/db";
 import { WEEKDAYS } from "@/lib/format";
 import { enabled } from "@/lib/messaging";
 import { DEPOSIT_REFUND_HOURS, stripeEnabled } from "@/lib/payments";
+import { formatPhases } from "@/lib/blocks";
 import { derivedSecret } from "@/lib/secrets";
 import { siteUrl } from "@/lib/site";
 import {
   addAddonAction,
   saveLoyaltyAction,
+  addResourceAction,
+  saveResourceAction,
+  saveGrowthAction,
+  saveStaffSkillsAction,
+  revokeSessionsAction,
   addPackAction,
   addServiceAction,
   addStaffAction,
@@ -42,6 +48,8 @@ export const metadata: Metadata = { title: "Ajustes", robots: { index: false, fo
 type Svc = { aftercare: string | null; cancel_notice_hours: number | null; rebook_weeks: number | null; consent_kind: string | null; deposit_always: boolean; id: number; slug: string; name: string; category: string; duration_min: number; price_cents: number; slot_step_min: number | null; buffer_min: number; deposit_cents: number; active: boolean; sort: number };
 type Hours = { weekday: number; closed: boolean; open: string | null; close: string | null; bs: string | null; be: string | null };
 type StaffHours = Hours & { staff_id: number };
+type Pose = { service_id: number; phases: string | null; res_kind: string | null; res_uses: string | null };
+type ResRow = { id: number; name: string; kind: string; active: boolean };
 type Staff = { id: number; name: string; active: boolean };
 type PackRow = { occasion: string | null; people: number; starts_on: string | null; ends_on: string | null; featured: boolean; id: number; name: string; emoji: string; description: string | null; service_slugs: string[]; discount_percent: number; active: boolean; sort: number };
 type AddonRow = { id: number; name: string; description: string | null; duration_min: number; price_cents: number; category: string | null; active: boolean; sort: number };
@@ -79,7 +87,12 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     );
   }
 
-  const [services, hoursRows, mode, staff, staffHours, cron, trends, packs, addons, policy, loyalty] = await Promise.all([
+  const [pose, resources, services, hoursRows, mode, staff, staffHours, cron, trends, packs, addons, policy, loyalty, growthRows, skills, auditRows] = await Promise.all([
+    query<Pose>(`SELECT s.id AS service_id,
+                        (SELECT string_agg(p.minutes::text || CASE WHEN p.kind = 'wait' THEN 'e' ELSE '' END, ' + ' ORDER BY p.position) FROM service_phases p WHERE p.service_id = s.id) AS phases,
+                        r.kind AS res_kind, r.uses AS res_uses
+                 FROM services s LEFT JOIN service_resources r ON r.service_id = s.id`).catch(() => [] as Pose[]),
+    query<ResRow>(`SELECT id, name, kind, active FROM resources ORDER BY active DESC, kind, sort, id`).catch(() => [] as ResRow[]),
     query<Svc>(`SELECT id, slug, name, category, duration_min, price_cents, slot_step_min, buffer_min, deposit_cents, deposit_always, rebook_weeks, consent_kind, cancel_notice_hours, aftercare, active, sort FROM services ORDER BY active DESC, sort, id`),
     query<Hours>(
       `SELECT weekday, closed, to_char(open_time, 'HH24:MI') AS open, to_char(close_time, 'HH24:MI') AS close,
@@ -97,8 +110,19 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
     query<AddonRow>(`SELECT id, name, description, duration_min, price_cents, category, active, sort FROM addons ORDER BY active DESC, sort, id`).catch(() => [] as AddonRow[]),
     getDepositPolicy().catch(() => ({ mode: "service" as const, afterNoShows: 1, defaultCents: 1000 })),
     getLoyalty().catch(() => ({ enabled: false, every: 10, reward: "una manicura clásica gratis" })),
+    query<{ key: string; value: string }>(`SELECT key, value FROM settings WHERE key IN ('auto_showed','abandon_recovery','reactivation_days','referral_enabled','referral_reward')`).catch(() => []),
+    query<{ staff_id: number; service_id: number }>(`SELECT staff_id, service_id FROM staff_services`).catch(() => []),
+    query<{ at: string; action: string; target: string | null }>(`SELECT to_char(at AT TIME ZONE $1::text, 'DD/MM HH24:MI') AS at, action, target FROM audit_log ORDER BY at DESC LIMIT 12`, [CONFIG.tz]).catch(() => []),
   ]);
+  const growth = new Map(growthRows.map((r) => [r.key, r.value]));
+  const skillOf = (staffId: number) => new Set(skills.filter((k) => k.staff_id === staffId).map((k) => k.service_id));
   const byDay = new Map(hoursRows.map((h) => [h.weekday, h]));
+  const poseOf = new Map(pose.map((p) => [p.service_id, p]));
+  const resKinds = Array.from(new Set(resources.map((r) => r.kind)));
+  const activeKinds = new Set(resources.filter((r) => r.active).map((r) => r.kind));
+  const missingKinds = Array.from(new Set(services.filter((s) => s.active).map((s) => poseOf.get(s.id)?.res_kind).filter((k): k is string => !!k && !activeKinds.has(k))));
+  const phasesText = (t: string | null) =>
+    t ? t.split(" + ").map((x) => (x.endsWith("e") ? `${x.slice(0, -1)} min espera` : `${x} min actúa`)).join(" · ") : "";
   const eur = (c: number) => (c / 100).toString().replace(".", ",");
   const cronMins = cron[0]?.mins ?? null;
   const depositWithoutStripe = !stripeEnabled() && services.some((s) => s.active && s.deposit_cents > 0);
@@ -191,10 +215,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           El hueco de cada servicio es su duración. «Limpieza» son los minutos que quedan bloqueados después (la clienta no los ve). «Señal» se cobra con tarjeta al reservar y se descuenta del total. Para quitar un servicio, desmarca «Activo»: no se borra.
         </p>
         {depositWithoutStripe && <p className="notice notice--error" role="alert">Hay servicios con señal, pero Stripe no está configurado: de momento se reservan sin cobrar señal.</p>}
+        <datalist id="reskinds">{resKinds.map((k) => <option key={k} value={k} />)}</datalist>
         <div className="svc-list">
           {services.map((s) => (
             <form key={s.id} action={saveServiceAction} className={`svc ${s.active ? "" : "svc--off"}`}>
               <input type="hidden" name="id" value={s.id} />
+              {(poseOf.get(s.id)?.phases?.includes("e") || poseOf.get(s.id)?.res_kind) && (
+                <p className="pose__badges">
+                  {poseOf.get(s.id)?.phases?.includes("e") && <span className="pose__badge">Con pose</span>}
+                  {poseOf.get(s.id)?.res_kind && <span className="pose__badge pose__badge--res">Recurso: {poseOf.get(s.id)?.res_kind}</span>}
+                </p>
+              )}
               <label className="field"><span>Servicio</span><input name="name" defaultValue={s.name} required maxLength={80} /></label>
               <label className="field"><span>Categoría</span><input name="category" defaultValue={s.category} required maxLength={60} /></label>
               <label className="field"><span>Duración (min)</span><input name="duration" type="number" min={5} max={480} step={5} defaultValue={s.duration_min} required /></label>
@@ -207,6 +238,10 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               <label className="field"><span>Cancelar con (horas)</span><input name="notice" type="number" min={0} max={168} defaultValue={s.cancel_notice_hours ?? ""} placeholder={String(CONFIG.cancelNoticeHours)} /></label>
               <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue={s.consent_kind ?? ""}><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
               <label className="check"><input type="checkbox" name="deposit_always" defaultChecked={s.deposit_always} /><span>Señal siempre</span></label>
+              <label className="field field--wide"><span>Fases <em>(opcional; «30 + 45e + 30»)</em></span><input name="phases" defaultValue={poseOf.get(s.id)?.phases ?? ""} placeholder="30 + 45e + 30" />
+                <small className="muted pose__help">Los minutos de cada tramo, y la «e» marca los de espera (la profesional queda libre). Deben sumar la duración. {poseOf.get(s.id)?.phases ? <b className="pose__preview">{phasesText(poseOf.get(s.id)?.phases ?? null)}</b> : "Vacío = sin esperas."}</small></label>
+              <label className="field"><span>Recurso necesario</span><input name="res_kind" list="reskinds" defaultValue={poseOf.get(s.id)?.res_kind ?? ""} maxLength={40} placeholder="ninguno" /></label>
+              <label className="field"><span>Lo usa</span><select name="res_uses" defaultValue={poseOf.get(s.id)?.res_uses ?? "all"}><option value="all">Toda la cita</option><option value="active">Solo mientras actúa</option></select></label>
               <label className="field field--wide"><span>Cuidados posteriores <em>(se envían tras la visita)</em></span><textarea name="aftercare" rows={2} maxLength={500} defaultValue={s.aftercare ?? ""} placeholder="Evita el agua muy caliente las primeras 24 h…" /></label>
               <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={s.active} /><span>Activo</span></label>
               <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
@@ -228,6 +263,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field"><span>Cancelar con (horas)</span><input name="notice" type="number" min={0} max={168} placeholder={String(CONFIG.cancelNoticeHours)} /></label>
           <label className="field"><span>Casillas de seguridad</span><select name="consent" defaultValue=""><option value="">Ninguna</option><option value="laser">Láser</option><option value="microblading">Microblading</option></select></label>
           <label className="check"><input type="checkbox" name="deposit_always" /><span>Señal siempre</span></label>
+          <label className="field field--wide"><span>Fases <em>(opcional; «30 + 45e + 30»)</em></span><input name="phases" placeholder="30 + 45e + 30" /></label>
+          <label className="field"><span>Recurso necesario</span><input name="res_kind" list="reskinds" maxLength={40} placeholder="ninguno" /></label>
+          <label className="field"><span>Lo usa</span><select name="res_uses" defaultValue="all"><option value="all">Toda la cita</option><option value="active">Solo mientras actúa</option></select></label>
           <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
         </form>
       </section>
@@ -263,6 +301,39 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           <label className="field field--wide"><span>Premio</span><input name="reward" maxLength={80} defaultValue={loyalty.reward} /></label>
           <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
         </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Automatizaciones y crecimiento</h2>
+        <p className="muted small">Lo que trabaja por ti sin que lo pidas. Los mensajes opcionales respetan siempre la baja de la clienta y solo salen de día.</p>
+        <form action={saveGrowthAction} className="stack">
+          <label className="check"><input type="checkbox" name="auto_showed" defaultChecked={growth.get("auto_showed") !== "off"} /><span><b>«Vino» automático.</b> Tres horas después de una cita sin marcar, cuenta como que vino (tú solo corriges las que no): así nunca se corta el «gracias», la valoración, el retoque ni los sellos.</span></label>
+          <label className="check"><input type="checkbox" name="abandon_recovery" defaultChecked={growth.get("abandon_recovery") !== "off"} /><span><b>Recuperar reservas a medias.</b> Si alguien deja su teléfono y no termina, se le escribe una sola vez con un enlace para retomarla.</span></label>
+          <label className="field field--narrow"><span>«Te echamos de menos» a los (días sin venir, 0 = no)</span><input type="number" name="reactivation_days" min={0} max={365} defaultValue={growth.get("reactivation_days") ?? "75"} /></label>
+          <label className="check"><input type="checkbox" name="referral_enabled" defaultChecked={growth.get("referral_enabled") !== "off"} /><span><b>Trae a una amiga.</b> Cada clienta tiene su enlace; cuando su amiga viene por primera vez, las dos ganan el premio (lo canjeas desde su ficha).</span></label>
+          <label className="field field--wide"><span>Premio por traer a una amiga</span><input name="referral_reward" maxLength={80} defaultValue={growth.get("referral_reward") ?? "un extra gratis"} /></label>
+          <button className="btn btn--primary btn--sm" type="submit">Guardar</button>
+        </form>
+      </section>
+
+      <section className="panel">
+        <h2 className="panel__title panel__title--sm">Seguridad</h2>
+        <p className="muted small">
+          Verificación del teléfono al reservar: <b>{process.env.PHONE_VERIFY ?? "automática"}</b> (se pide un código solo a números nuevos; quien ya vino no lo ve nunca). Se cambia con <code>PHONE_VERIFY=off|new|all</code>.
+        </p>
+        <form action={revokeSessionsAction}>
+          <button className="btn btn--ghost btn--sm" type="submit">Cerrar sesión en todos los dispositivos</button>
+        </form>
+        {auditRows.length > 0 && (
+          <>
+            <h3 className="svc__new">Últimos cambios en el panel</h3>
+            <ul className="muted small">
+              {auditRows.map((a, i) => (
+                <li key={i}>{a.at} · {a.action}</li>
+              ))}
+            </ul>
+          </>
+        )}
       </section>
 
       <section className="panel">
@@ -359,6 +430,34 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       </section>
 
       <section className="panel">
+        <h2 className="panel__title panel__title--sm">Recursos</h2>
+        <p className="muted small">
+          Lo que no se puede usar a la vez en dos citas: cada unidad es exclusiva. Por ejemplo, «Cabina láser 1» (tipo «láser»), o «Lavacabezas 1» y «Lavacabezas 2» (las dos de tipo «lavacabezas»). Después, en cada servicio, indica el tipo que necesita. Las unidades no se borran: se desactivan.
+        </p>
+        {missingKinds.map((k) => (
+          <p key={k} className="notice notice--error" role="alert">Falta una unidad activa de tipo «{k}»: los servicios que la necesitan no ofrecen huecos.</p>
+        ))}
+        <div className="svc-list">
+          {resources.map((r) => (
+            <form key={r.id} action={saveResourceAction} className={`svc ${r.active ? "" : "svc--off"}`}>
+              <input type="hidden" name="id" value={r.id} />
+              <label className="field"><span>Unidad</span><input name="name" defaultValue={r.name} required maxLength={60} /></label>
+              <label className="field"><span>Tipo</span><input name="kind" list="reskinds" defaultValue={r.kind} required maxLength={40} /></label>
+              <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={r.active} /><span>Activa</span></label>
+              <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
+            </form>
+          ))}
+          {resources.length === 0 && <p className="muted">Todavía no hay recursos. Añade el primero si algún servicio usa una cabina o máquina que no se pueda duplicar.</p>}
+        </div>
+        <h3 className="svc__new">Añadir unidad</h3>
+        <form action={addResourceAction} className="svc">
+          <label className="field"><span>Unidad</span><input name="name" required maxLength={60} placeholder="Cabina láser 1" /></label>
+          <label className="field"><span>Tipo</span><input name="kind" list="reskinds" required maxLength={40} placeholder="láser" /></label>
+          <button className="btn btn--primary btn--sm" type="submit">Añadir</button>
+        </form>
+      </section>
+
+      <section className="panel">
         <h2 className="panel__title panel__title--sm">Horario del salón</h2>
         <p className="muted small">Pausa opcional (p. ej. 14:00 a 16:00): los huecos se calculan por separado antes y después de la pausa.</p>
         <div className="svc-list">
@@ -381,6 +480,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                   <label className="check svc__active"><input type="checkbox" name="active" defaultChecked={p.active} /><span>Activa</span></label>
                   <button className="btn btn--ghost btn--sm" type="submit">Guardar</button>
                 </form>
+                <details>
+                  <summary>{skillOf(p.id).size ? `Solo hace ${skillOf(p.id).size} servicios` : `Hace todos los servicios. Pulsa para limitarlos`}</summary>
+                  <form action={saveStaffSkillsAction} className="stack">
+                    <input type="hidden" name="staffId" value={p.id} />
+                    <p className="muted small">Marca solo lo que hace {p.name}. Sin nada marcado, hace todo. Las clientas solo verán huecos de quien puede hacer su servicio.</p>
+                    {services.filter((x) => x.active).map((x) => (
+                      <label key={x.id} className="check"><input type="checkbox" name="svc" value={x.id} defaultChecked={skillOf(p.id).has(x.id)} /><span>{x.name}</span></label>
+                    ))}
+                    <button className="btn btn--ghost btn--sm" type="submit">Guardar habilidades</button>
+                  </form>
+                </details>
                 <details>
                   <summary>{own.length ? `Horario propio de ${p.name} (${own.length} días definidos)` : `Usa el horario del salón. Pulsa para darle uno propio`}</summary>
                   <div className="svc-list">

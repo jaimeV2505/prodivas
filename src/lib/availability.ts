@@ -1,4 +1,5 @@
 import { CONFIG } from "./config";
+import type { Pattern } from "./blocks";
 import { run, type Runner } from "./db";
 
 export type SlotRow = {
@@ -41,7 +42,7 @@ type Raw = { day: string; time: string; starts_at: Date; staff_id: number; avail
  * (HOLD vivos) y el tiempo libre del salón o de esa profesional.
  *   $1 desde · $2 hasta · $3 zona horaria · $4 profesional (o NULL) · $5 cita a ignorar (al cambiar de hora)
  */
-const WINDOWS = `
+const WINDOWS_TPL = `
 WITH days AS (
   SELECT d::date AS day FROM generate_series($1::date, $2::date, interval '1 day') AS d
 ),
@@ -68,17 +69,17 @@ segs AS (
   ) seg
   WHERE s.active AND ($4::int IS NULL OR s.id = $4::int)
     AND NOT e.closed AND e.open_time IS NOT NULL AND e.close_time IS NOT NULL
+    -- habilidades: sin filas en staff_services = hace todo; con filas, solo los servicios marcados
+    AND (COALESCE(cardinality(__SVC__), 0) = 0
+         OR NOT EXISTS (SELECT 1 FROM staff_services k0 WHERE k0.staff_id = s.id)
+         OR (SELECT count(DISTINCT k.service_id) FROM staff_services k WHERE k.staff_id = s.id AND k.service_id = ANY(__SVC__)) = cardinality(__SVC__))
 ),
 busy AS (
   SELECT sg.staff_id, sg.day, sg.s_from, sg.s_to,
          COALESCE(range_agg(tstzrange(x.ra, x.rb, '[)')) FILTER (WHERE x.ra IS NOT NULL), '{}'::tstzmultirange) AS busy
   FROM segs sg
   LEFT JOIN LATERAL (
-    SELECT b.starts_at AS ra, b.blocked_until AS rb FROM bookings b
-     WHERE b.staff_id = sg.staff_id
-       AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
-       AND ($5::uuid IS NULL OR b.id <> $5::uuid)
-       AND tstzrange(b.starts_at, b.blocked_until, '[)') && tstzrange(sg.s_from, sg.s_to, '[)')
+    __BUSY__
     UNION ALL
     SELECT t.starts_at, t.ends_at FROM time_off t
      WHERE (t.staff_id IS NULL OR t.staff_id = sg.staff_id)
@@ -92,6 +93,21 @@ wins AS (
   CROSS JOIN LATERAL unnest(tstzmultirange(tstzrange(bz.s_from, bz.s_to, '[)')) - bz.busy) AS w(r)
 )`;
 
+/** Lo que ocupa a una profesional: sus bloques vivos (la fuente de verdad) … */
+const BUSY_BLOCKS = `SELECT lower(bb.during) AS ra, upper(bb.during) AS rb FROM booking_blocks bb JOIN bookings b ON b.id = bb.booking_id
+     WHERE bb.staff_id = sg.staff_id AND bb.live
+       AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
+       AND ($5::uuid IS NULL OR b.id <> $5::uuid)
+       AND bb.during && tstzrange(sg.s_from, sg.s_to, '[)')`;
+/** … y la forma antigua (una cita = un bloque), que solo se usa para comparar en sombra (AVAILABILITY_SHADOW=on). */
+const BUSY_LEGACY = `SELECT b.starts_at AS ra, b.blocked_until AS rb FROM bookings b
+     WHERE b.staff_id = sg.staff_id
+       AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
+       AND ($5::uuid IS NULL OR b.id <> $5::uuid)
+       AND tstzrange(b.starts_at, b.blocked_until, '[)') && tstzrange(sg.s_from, sg.s_to, '[)')`;
+const windows = (busy: string) => WINDOWS_TPL.replace("__BUSY__", () => busy);
+const WINDOWS = windows(BUSY_BLOCKS);
+
 /**
  * Huecos para una visita. $6 minutos necesarios (duración + limpieza) · $7 paso · $8 preaviso (min)
  * $9 modo · $10 resto mínimo (min)
@@ -101,7 +117,7 @@ wins AS (
  * - Regla de restos: no se ofrece un hueco que deje, antes o después, un resto libre (distinto de 0)
  *   más corto que el servicio más corto.
  */
-const SLOTS_SQL = `${WINDOWS},
+const slotsSql = (w: string) => `${w.replace(/__SVC__/g, () => "$11::int[]")},
 grid AS (
   SELECT bz.day, bz.staff_id, gs AS starts_at, gs + make_interval(mins => $6::int) AS ends_at
   FROM busy bz
@@ -148,15 +164,80 @@ SELECT * FROM (
 ) d
 ORDER BY d.starts_at, d.staff_id
 `;
+const SLOTS_SQL = slotsSql(WINDOWS);
+const SLOTS_SQL_LEGACY = slotsSql(windows(BUSY_LEGACY));
+
+
+/**
+ * Visitas con tiempos de pose o recursos: se prueba cada inicio de la rejilla y se comprueba cada tramo en que la
+ * profesional actúa (dentro de su horario, sin otros bloques ni cierres) y que haya una unidad libre de cada recurso.
+ *   $6 minutos totales · $7 paso · $8 preaviso · $9 tramos activos (json) · $10 recursos (json) · $11 servicios (habilidades)
+ */
+const SEGS_PART = WINDOWS_TPL.slice(0, WINDOWS_TPL.indexOf("busy AS ("));
+const COMPLEX_SQL = `${SEGS_PART.replace(/__SVC__/g, () => "$11::int[]")}
+bounds AS (SELECT staff_id, day, min(s_from) AS a, max(s_to) AS b FROM segs GROUP BY staff_id, day),
+cands AS (
+  SELECT bd.day, bd.staff_id, gs AS t
+  FROM bounds bd
+  CROSS JOIN LATERAL generate_series(bd.a, bd.b - make_interval(mins => $6::int), make_interval(mins => $7::int)) gs
+  WHERE gs > now() + make_interval(mins => $8::int)
+),
+judged AS (
+  SELECT c.day, c.staff_id, c.t,
+    (NOT EXISTS (
+       SELECT 1 FROM jsonb_to_recordset($9::jsonb) AS a(o int, l int)
+       WHERE NOT EXISTS (SELECT 1 FROM segs w WHERE w.day = c.day AND w.staff_id = c.staff_id
+                           AND w.s_from <= c.t + make_interval(mins => a.o) AND c.t + make_interval(mins => a.o + a.l) <= w.s_to)
+          OR EXISTS (SELECT 1 FROM booking_blocks bb JOIN bookings b ON b.id = bb.booking_id
+                      WHERE bb.staff_id = c.staff_id AND bb.live
+                        AND (b.status = 'CONFIRMED' OR (b.status = 'HOLD' AND b.hold_expires_at > now()))
+                        AND ($5::uuid IS NULL OR b.id <> $5::uuid)
+                        AND bb.during && tstzrange(c.t + make_interval(mins => a.o), c.t + make_interval(mins => a.o + a.l), '[)'))
+          OR EXISTS (SELECT 1 FROM time_off t2 WHERE (t2.staff_id IS NULL OR t2.staff_id = c.staff_id)
+                      AND tstzrange(t2.starts_at, t2.ends_at, '[)') && tstzrange(c.t + make_interval(mins => a.o), c.t + make_interval(mins => a.o + a.l), '[)'))
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements($10::jsonb) rq
+      WHERE NOT EXISTS (
+        SELECT 1 FROM resources r WHERE r.active AND r.kind = rq->>'kind'
+          AND NOT EXISTS (
+            SELECT 1 FROM jsonb_to_recordset(rq->'ranges') AS g(o int, l int)
+            JOIN booking_blocks rb ON rb.resource_id = r.id AND rb.live
+                 AND rb.during && tstzrange(c.t + make_interval(mins => g.o), c.t + make_interval(mins => g.o + g.l), '[)')
+            JOIN bookings b2 ON b2.id = rb.booking_id AND (b2.status = 'CONFIRMED' OR (b2.status = 'HOLD' AND b2.hold_expires_at > now()))
+                 AND ($5::uuid IS NULL OR b2.id <> $5::uuid)
+          )
+      )
+    )) AS available
+  FROM cands c
+)
+SELECT j.day::text AS day, to_char(j.t AT TIME ZONE $3::text, 'HH24:MI') AS time, j.t AS starts_at, j.staff_id, j.available
+FROM judged j
+ORDER BY j.t, j.staff_id
+`;
 
 /** Cuántas citas de esta visita caben de verdad en el rango (escasez honesta). $6 minutos necesarios · $7 preaviso */
-const CAPACITY_SQL = `${WINDOWS}
+const CAPACITY_SQL = `${WINDOWS.replace(/__SVC__/g, () => "$8::int[]")}
 SELECT COALESCE(SUM(FLOOR(
          EXTRACT(EPOCH FROM (w.wb - GREATEST(w.wa, now() + make_interval(mins => $7::int)))) / 60 / $6::int
        )), 0)::int AS n
 FROM wins w
 WHERE w.wb > now() + make_interval(mins => $7::int)
 `;
+
+/** Comparación en sombra: el cálculo antiguo (una cita = un bloque) y el nuevo (bloques) tienen que dar exactamente lo mismo. */
+async function shadowCompare(q: Runner, fresh: Raw[], args: unknown[]): Promise<void> {
+  try {
+    const old = (await q(SLOTS_SQL_LEGACY, args)) as unknown as Raw[];
+    const key = (r: Raw) => `${r.staff_id}|${new Date(r.starts_at).toISOString()}|${r.available}`;
+    const a = new Set(old.map(key));
+    const b = new Set(fresh.map(key));
+    const diff = [...a].filter((x) => !b.has(x)).length + [...b].filter((x) => !a.has(x)).length;
+    await q(`INSERT INTO audit_log (actor, action, detail) VALUES ('sistema', $1, $2)`, [diff === 0 ? "huecos_sombra_ok" : "huecos_sombra_DIFERENCIA", `${fresh.length} huecos, ${diff} diferencias`]);
+  } catch (e) {
+    console.error("[shadow]", e);
+  }
+}
 
 export async function getSlotMode(q: Runner = run): Promise<SlotMode> {
   const r = (await q(`SELECT value FROM settings WHERE key = 'slot_mode'`)) as unknown as { value: string }[];
@@ -173,14 +254,34 @@ export async function getSlotRows(
     stepMin?: number | null;
     staffId?: number | null;
     excludeBookingId?: string | null;
+    /** Servicios de la visita: solo se ofrecen profesionales que los hacen todos. */
+    serviceIds?: number[] | null;
+    /** Fases y recursos de la visita: si llevan espera o recursos se usa el cálculo por tramos. */
+    pattern?: Pattern | null;
   },
   q: Runner = run,
 ): Promise<SlotRow[]> {
+  if (opts.pattern?.complex) {
+    const rowsC = (await q(COMPLEX_SQL, [
+      opts.from,
+      opts.to,
+      CONFIG.tz,
+      opts.staffId ?? null,
+      opts.excludeBookingId ?? null,
+      opts.pattern.total,
+      Math.max(5, opts.stepMin ?? 15),
+      CONFIG.minNoticeMin,
+      JSON.stringify(opts.pattern.active),
+      JSON.stringify(opts.pattern.reqs),
+      uniqueIds(opts.serviceIds),
+    ])) as unknown as Raw[];
+    return rowsC.map((r) => ({ day: r.day, time: r.time, startsAt: new Date(r.starts_at).toISOString(), staffId: r.staff_id, available: r.available }));
+  }
   const mode = await getSlotMode(q);
   const md = (await q(`SELECT COALESCE(MIN(duration_min), 15) AS m FROM services WHERE active`)) as unknown as { m: number }[];
   const minRest = Math.min(60, Math.max(5, Number(md[0]?.m ?? 15)));
 
-  const rows = (await q(SLOTS_SQL, [
+  const args = [
     opts.from,
     opts.to,
     CONFIG.tz,
@@ -191,7 +292,10 @@ export async function getSlotRows(
     CONFIG.minNoticeMin,
     mode,
     minRest,
-  ])) as unknown as Raw[];
+    uniqueIds(opts.serviceIds),
+  ];
+  const rows = (await q(SLOTS_SQL, args)) as unknown as Raw[];
+  if (process.env.AVAILABILITY_SHADOW === "on") await shadowCompare(q, rows, args);
 
   return rows.map((r) => ({
     day: r.day,
@@ -202,10 +306,17 @@ export async function getSlotRows(
   }));
 }
 
+const uniqueIds = (ids?: number[] | null): number[] | null => (ids && ids.length ? Array.from(new Set(ids)) : null);
+
 export async function getCapacity(
-  opts: { from: string; to: string; durationMin: number; bufferMin?: number | null; staffId?: number | null },
+  opts: { from: string; to: string; durationMin: number; bufferMin?: number | null; staffId?: number | null; serviceIds?: number[] | null; pattern?: Pattern | null; stepMin?: number | null },
   q: Runner = run,
 ): Promise<number> {
+  if (opts.pattern?.complex) {
+    // con esperas y recursos no hay una cuenta exacta: se cuentan los inicios libres (cota superior, nunca inventa escasez)
+    const rows = await getSlotRows({ from: opts.from, to: opts.to, durationMin: opts.durationMin, bufferMin: opts.bufferMin, stepMin: opts.stepMin, staffId: opts.staffId, serviceIds: opts.serviceIds, pattern: opts.pattern }, q);
+    return new Set(rows.filter((r) => r.available).map((r) => r.startsAt)).size;
+  }
   const r = (await q(CAPACITY_SQL, [
     opts.from,
     opts.to,
@@ -214,6 +325,7 @@ export async function getCapacity(
     null,
     opts.durationMin + (opts.bufferMin ?? 0),
     CONFIG.minNoticeMin,
+    uniqueIds(opts.serviceIds),
   ])) as unknown as {
     n: number;
   }[];

@@ -8,7 +8,7 @@ export async function respond(fn: () => Promise<unknown>): Promise<NextResponse>
     return NextResponse.json(await fn(), { headers });
   } catch (e) {
     if (e instanceof BookingError) {
-      return NextResponse.json({ error: { code: e.code, message: e.message } }, { status: e.status, headers });
+      return NextResponse.json({ error: { code: e.code, message: e.message, ...(e.data ? { data: e.data } : {}) } }, { status: e.status, headers });
     }
     if (e instanceof ZodError) {
       const message = e.issues[0]?.message ?? "Datos no válidos.";

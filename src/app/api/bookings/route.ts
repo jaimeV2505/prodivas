@@ -1,6 +1,9 @@
 import { after, type NextRequest } from "next/server";
 import { z } from "zod";
+import { guardConfirm } from "@/lib/abuse";
 import { BookingError, confirmBooking } from "@/lib/bookings";
+import { markLeadsBooked, recordConfirmed } from "@/lib/funnel";
+import { registerReferral } from "@/lib/referrals";
 import { respond } from "@/lib/http";
 import { notifyBookingCreated, notifyOwnerRepeatOffender } from "@/lib/notify";
 import { markWaitlistBooked } from "@/lib/waitlist";
@@ -19,12 +22,15 @@ const Body = z.object({
   notes: z.string().trim().max(500).optional(),
   acks: z.array(z.enum(["laser", "microblading"])).max(4).optional(), // casillas de seguridad marcadas
   website: z.string().optional(), // honeypot: las personas no lo ven ni lo rellenan
+  otp: z.string().regex(/^\d{6}$/).optional(), // código de verificación del teléfono
+  attr: z.object({ sid: z.string().max(40).optional(), utm_source: z.string().max(60).optional(), utm_medium: z.string().max(60).optional(), utm_campaign: z.string().max(60).optional(), ref: z.string().max(12).optional(), flow: z.string().max(8).optional() }).optional(),
 });
 
 export async function POST(req: NextRequest) {
   return respond(async () => {
     const b = Body.parse(await req.json());
     if (b.website) throw new BookingError("INVALID", "No hemos podido procesar la solicitud.");
+    await guardConfirm(req, b.phone, b.otp);
     const r = await confirmBooking({
       holdId: b.holdId,
       holdToken: b.holdToken,
@@ -37,6 +43,9 @@ export async function POST(req: NextRequest) {
     // Con señal pendiente se devuelve el enlace de pago; los avisos salen cuando Stripe confirma el pago
     if (r.checkoutUrl) return { booking: r.booking, checkoutUrl: r.checkoutUrl };
     after(async () => {
+      await recordConfirmed([r.booking.id], b.attr, r.booking.serviceName);
+      await markLeadsBooked(r.booking.customerPhone);
+      await registerReferral(r.booking.customerPhone, b.attr?.ref);
       await notifyBookingCreated(r.booking);
       await markWaitlistBooked(r.booking.customerPhone, r.booking.startsAt);
       if (r.noShowCount >= Number(process.env.NO_SHOW_ALERT ?? 2)) await notifyOwnerRepeatOffender(r.booking, r.noShowCount);

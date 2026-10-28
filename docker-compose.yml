@@ -66,6 +66,23 @@ services:
       SUMMARY_TIME: ${SUMMARY_TIME:-08:30}
       WA_TEMPLATE_TEST: ${WA_TEMPLATE_TEST:-hello_world}
       WA_TEMPLATE_TEST_LANG: ${WA_TEMPLATE_TEST_LANG:-en_US}
+      PHONE_VERIFY: ${PHONE_VERIFY:-}
+      DEMO_MODE: ${DEMO_MODE:-}
+
+  # Recordatorios, recuperación de reservas, «vino» automático y limpieza: llama a la web cada minuto
+  cron:
+    image: node:22-alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+    environment:
+      CRON_SECRET: ${CRON_SECRET:-local-cron-secret}
+    command:
+      - node
+      - -e
+      - |
+        const tick = () => fetch("http://web:3000/api/cron/reminders", { method: "POST", headers: { Authorization: "Bearer " + process.env.CRON_SECRET }, signal: AbortSignal.timeout(55000) }).catch(() => {});
+        setTimeout(function loop() { tick().finally(() => setTimeout(loop, 60000)); }, 60000);
 
 volumes:
   pgdata:

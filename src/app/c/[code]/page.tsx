@@ -11,6 +11,7 @@ import { query } from "@/lib/db";
 import { getLoyalty, stampsOf } from "@/lib/loyalty";
 import { fmtLong, fmtPrice } from "@/lib/format";
 import { whenWords } from "@/lib/notify";
+import { ensureReferralCode, getReferralSettings, referralLink } from "@/lib/referrals";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Tu cita", robots: { index: false, follow: false } };
@@ -43,6 +44,21 @@ export default async function ConfirmPage({
           return c ? { ...l, ...stampsOf(c.visit_count, c.loyalty_redeemed, l.every) } : null;
         } catch {
           return null; // migración pendiente: sin tarjeta
+        }
+      })()
+    : null;
+  // «Trae a una amiga»: su enlace personal para compartir por WhatsApp
+  const referral = booking?.customerId && booking.status === "CONFIRMED"
+    ? await (async () => {
+        try {
+          const st = await getReferralSettings();
+          if (!st.enabled) return null;
+          const code = await ensureReferralCode(booking.customerId!);
+          const link = referralLink(code);
+          const text = `Mira, yo me hago las uñas en Pro Diva (Melide) y te va a encantar. Reserva con mi enlace y las dos ganamos ${st.reward}: ${link}`;
+          return { reward: st.reward, wa: `https://wa.me/?text=${encodeURIComponent(text)}`, link };
+        } catch {
+          return null;
         }
       })()
     : null;
@@ -107,6 +123,13 @@ export default async function ConfirmPage({
                 ))}
               </div>
               {loyalty.rewards === 0 && <p className="muted small">Cada visita suma un sello. Al completar la tarjeta: {loyalty.reward}.</p>}
+            </div>
+          )}
+          {referral && (
+            <div className="loyalty referral" role="note">
+              <p className="loyalty__t">💌 Trae a una amiga: las dos ganáis {referral.reward}</p>
+              <p className="muted small">Cuando tu amiga venga por primera vez con tu enlace, las dos tenéis premio.</p>
+              <a className="btn btn--primary btn--sm" href={referral.wa} target="_blank" rel="noopener noreferrer">Enviarle mi enlace por WhatsApp</a>
             </div>
           )}
           <p className="muted small">{CONFIG.salon.address}</p>

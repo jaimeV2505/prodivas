@@ -1,7 +1,9 @@
 import { after, type NextRequest } from "next/server";
 import { z } from "zod";
 import { respondToBooking } from "@/lib/bookings";
-import { respond } from "@/lib/http";
+import { hashIp } from "@/lib/bookings";
+import { clientIp, respond } from "@/lib/http";
+import { limit } from "@/lib/ratelimit";
 import { notifyOwnerResponse } from "@/lib/notify";
 import { offerFreedSlot } from "@/lib/waitlist";
 
@@ -17,6 +19,7 @@ const Body = z.object({
 // POST (nunca GET): los antivirus de correo "abren" los enlaces y no deben confirmar ni cancelar nada.
 export async function POST(req: NextRequest) {
   return respond(async () => {
+    await limit(`respond:${hashIp(clientIp(req))}`, 40, 600);
     const b = Body.parse(await req.json());
     const r = await respondToBooking({ code: b.code.toUpperCase(), token: b.token, action: b.action, why: b.why ?? null });
     if (r.changed && r.state !== "already_cancelled") {

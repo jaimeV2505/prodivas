@@ -12,6 +12,9 @@ import { saveBooking, saveVisitHistory } from "@/lib/myBookings";
 import { getDict, type Dict } from "@/lib/i18n";
 import MyBookings from "./MyBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
+import { useLeadCapture } from "@/lib/useLead";
+import { attribution, track } from "@/lib/track";
+import OtpField from "./OtpField";
 import CallbackForm from "./CallbackForm";
 import PetalBurst from "./PetalBurst";
 import WaitlistForm from "./WaitlistForm";
@@ -23,7 +26,7 @@ type Slot = { day: string; time: string; startsAt: string; available: boolean };
 type Hold = { holdId: string; holdToken: string; startsAt: string; deadline: number };
 type Last = { code: string; token: string; startsAt: string; serviceName: string };
 type Done = Last & { endsAt: string };
-type Profile = { name: string; phone: string; slug: string; serviceName: string; slugs?: string[] };
+type Profile = { name: string; phone: string; slug: string; serviceName: string; slugs?: string[]; staffId?: number };
 
 const buzz = () => {
   try {
@@ -102,6 +105,8 @@ export default function EasyBooking({
   const [notice, setNotice] = useState<string | null>(null);
   const [form, setForm] = useState({ name: "", phone: "" });
   const [acks, setAcks] = useState<Record<string, boolean>>({});
+  const [otpAsk, setOtpAsk] = useState<{ devCode?: string } | null>(null);
+  const [otp, setOtp] = useState("");
   // Señal: «según el servicio» o solo a quien ya ha faltado (entonces solo cuentan los servicios marcados «siempre»)
   const knownDeposit = service ? (depositPolicy === "repeat" ? (service.depositAlways ? service.depositCents ?? 0 : 0) : service.depositCents ?? 0) : 0;
   const safetyKinds = service?.kinds ?? (isKind(service?.consentKind) ? [service!.consentKind as "laser" | "microblading"] : []);
@@ -138,6 +143,19 @@ export default function EasyBooking({
   }, [xl]);
 
   const categories = useMemo(() => Array.from(new Set(services.map((s) => s.category))), [services]);
+
+  // Medición anónima del embudo (nunca datos personales)
+  const slugsKey = service ? (service.slugs ?? [service.slug]).join(",") : "";
+  useEffect(() => {
+    if (slugsKey && (step === "day" || step === "time")) track("service", { flow: "easy", services: slugsKey.split(",") });
+  }, [slugsKey, step]);
+  useEffect(() => {
+    if (slugsKey && step === "time" && slots && slots.some((x) => x.available)) track("slots", { flow: "easy", services: slugsKey.split(",") });
+  }, [slugsKey, step, slots]);
+  useEffect(() => {
+    if (step === "details") track("details", { flow: "easy", services: slugsKey.split(",") });
+  }, [step, slugsKey]);
+  useLeadCapture({ holdId: step === "details" ? hold?.holdId : undefined, holdToken: hold?.holdToken, phone: form.phone, name: form.name, flow: "easy" });
 
   const loadSlots = useCallback(async () => {
     if (!service) return;
@@ -228,7 +246,7 @@ export default function EasyBooking({
       const r = await fetch("/api/holds", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceIds: service.ids ?? [service.id], ...(service.packSlug ? { packageSlug: service.packSlug } : {}), staffId: null, startsAt: slot.startsAt }),
+        body: JSON.stringify({ serviceIds: service.ids ?? [service.id], ...(service.packSlug ? { packageSlug: service.packSlug } : {}), staffId: null, ...(profile?.staffId ? { preferStaffId: profile.staffId } : {}), startsAt: slot.startsAt }),
       });
       const j = await r.json();
       if (!r.ok) {
@@ -236,6 +254,7 @@ export default function EasyBooking({
         await loadSlots();
         return;
       }
+      track("hold", { flow: "easy", services: service.slugs ?? [service.slug], once: false });
       setHold({ holdId: j.holdId, holdToken: j.holdToken, startsAt: slot.startsAt, deadline: Date.now() + j.expiresInSec * 1000 });
       setStep("details");
     } catch {
@@ -254,12 +273,18 @@ export default function EasyBooking({
       const r = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ holdId: hold.holdId, holdToken: hold.holdToken, name: form.name, phone: form.phone, ...(safetyKinds.length ? { acks: safetyKinds } : {}) }),
+        body: JSON.stringify({ holdId: hold.holdId, holdToken: hold.holdToken, name: form.name, phone: form.phone, ...(safetyKinds.length ? { acks: safetyKinds } : {}), ...(otpAsk && otp.length === 6 ? { otp } : {}), attr: { ...attribution(), flow: "easy" } }),
       });
       const j = await r.json();
       if (!r.ok) {
-        setNotice(j?.error?.message ?? "No hemos podido confirmar la cita.");
         const code = j?.error?.code as string | undefined;
+        if (code === "VERIFY") {
+          setOtpAsk({ devCode: j?.error?.data?.devCode as string | undefined });
+          if (j?.error?.data?.wrong) setOtp("");
+          setNotice(j?.error?.message ?? "Escribe el código que te hemos enviado.");
+          return;
+        }
+        setNotice(j?.error?.message ?? "No hemos podido confirmar la cita.");
         if (code === "SLOT_TAKEN" || code === "HOLD_EXPIRED" || code === "NOT_FOUND") {
           setHold(null);
           setStep("time");
@@ -280,7 +305,7 @@ export default function EasyBooking({
       try {
         saveBooking(b.code, b.token);
         saveVisitHistory({ startsAt: b.startsAt, slugs: service ? (service.slugs ?? [service.slug]) : [] });
-        localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, slug: service?.slug ?? "", serviceName: b.serviceName, slugs: service ? (service.slugs ?? [service.slug]) : [] }));
+        localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, staffId: (b as { staffId?: number }).staffId ?? profile?.staffId, slug: service?.slug ?? "", serviceName: b.serviceName, slugs: service ? (service.slugs ?? [service.slug]) : [] }));
       } catch {
         /* nada */
       }
@@ -531,7 +556,7 @@ export default function EasyBooking({
                   setStep("day");
                 }}
               >
-                <span><b>{s.name}</b><small>{fmtDuration(s.durationMin)}</small></span>
+                <span><b>{s.name}</b><small>{fmtDuration(s.durationMin)}{s.waitMin ? ` · incluye ${s.waitMin} min de pose` : ""}</small></span>
                 <span className="easy__price">{fmtPrice(s.priceCents)}</span>
               </button>
             ))}
@@ -608,8 +633,9 @@ export default function EasyBooking({
             </label>
             <label className="easy__field">
               <span>Tu teléfono (te avisaremos por mensaje)</span>
-              <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="600 123 456" />
+              <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => { setOtpAsk(null); setOtp(""); setForm({ ...form, phone: e.target.value }); }} placeholder="600 123 456" />
             </label>
+            {otpAsk && <OtpField value={otp} onChange={setOtp} devCode={otpAsk.devCode} phone={form.phone} />}
             {safetyKinds.map((k) => (
               <fieldset key={k} className="safety easy__safety">
                 <legend>{getDict().safetyTitle} · {getDict()[`${k}Title` as "laserTitle"]}</legend>
@@ -629,9 +655,9 @@ export default function EasyBooking({
             )}
             {depositEnabled && depositPolicy === "repeat" && <p className="notice notice--info easy__notice">{getDict().depositPolicyNote}</p>}
             <button type="submit" className="easy__btn easy__btn--main" disabled={busy || !allAcked}>
-              {busy ? "Un momento…" : depositEnabled && knownDeposit > 0 ? `Pagar señal de ${fmtPrice(knownDeposit)}` : "Confirmar mi cita"}
+              {busy ? "Un momento…" : otpAsk ? "Verificar y confirmar" : depositEnabled && knownDeposit > 0 ? `Pagar señal de ${fmtPrice(knownDeposit)}` : "Confirmar mi cita"}
             </button>
-            <p className="easy__legal">Al confirmar, Pro Diva usará tus datos para gestionar tu cita y enviarte la confirmación y un recordatorio por WhatsApp o SMS.</p>
+            <p className="easy__legal">Al confirmar, Pro Diva usará tus datos para gestionar tu cita y enviarte la confirmación y un recordatorio por WhatsApp o SMS. Si no terminas, te escribiremos una sola vez por si quieres retomarla. <a href="/privacidad">Privacidad</a></p>
           </form>
         </>
       )}

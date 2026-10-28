@@ -15,7 +15,8 @@ export async function loadCatalog(): Promise<Catalog> {
     const [services, addons, packs, policy] = await Promise.all([
       query<Service>(
         `SELECT id, slug, name, category, description, duration_min AS "durationMin", price_cents AS "priceCents",
-                deposit_cents AS "depositCents", deposit_always AS "depositAlways", rebook_weeks AS "rebookWeeks", consent_kind AS "consentKind"
+                deposit_cents AS "depositCents", deposit_always AS "depositAlways", rebook_weeks AS "rebookWeeks", consent_kind AS "consentKind",
+                COALESCE((SELECT sum(minutes) FROM service_phases sp WHERE sp.service_id = services.id AND sp.kind = 'wait'), 0)::int AS "waitMin"
          FROM services WHERE active ORDER BY sort, id`,
       ),
       query<Addon>(

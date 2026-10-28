@@ -11,8 +11,11 @@ import { fmtDayLabel, fmtDuration, fmtHM, fmtLong, fmtMonth, fmtPrice, fmtShortD
 import { fill, getDict, LOCALE, type Dict } from "@/lib/i18n";
 import { loadVisitHistory, saveBooking, saveVisitHistory, usualOf, type VisitRecord } from "@/lib/myBookings";
 import { useStepHistory } from "@/lib/useStepHistory";
+import { useLeadCapture } from "@/lib/useLead";
+import { attribution, track } from "@/lib/track";
 import type { Trend } from "@/lib/trends";
 import BookingAvatar, { type AvatarState } from "./BookingAvatar";
+import OtpField from "./OtpField";
 import PetalBurst from "./PetalBurst";
 import Quiz from "./Quiz";
 import RebookCard from "./RebookCard";
@@ -29,6 +32,8 @@ export type Service = {
   depositCents?: number;
   depositAlways?: boolean;
   rebookWeeks?: number | null;
+  /** Minutos de pose/espera que incluye (la profesional no está todo el rato; la clienta sí). */
+  waitMin?: number;
   consentKind?: string | null;
 };
 export type Staff = { id: number; name: string };
@@ -71,6 +76,8 @@ type Props = {
   initialDay?: string;
   initialTime?: string;
   initialColor?: string;
+  /** Profesional preseleccionada (enlace `?pro=`). */
+  initialStaffId?: number;
   initialExtras?: string[];
   trends?: Trend[];
   today: string;
@@ -112,6 +119,7 @@ export default function BookingFlow({
   initialDay,
   initialTime,
   initialColor,
+  initialStaffId,
   initialExtras,
   trends = [],
   today,
@@ -142,8 +150,8 @@ export default function BookingFlow({
 
   const initialService = services.find((s) => s.slug === initialSlug) ?? null;
   const [service, setService] = useState<Service | null>(initialService);
-  const [staffChoice, setStaffChoice] = useState<number | null>(null); // null = cualquiera
-  const [step, setStep] = useState<Step>(initialService ? (multiStaff && !initialTime ? "staff" : "time") : "service");
+  const [staffChoice, setStaffChoice] = useState<number | null>(initialStaffId && staff.some((x) => x.id === initialStaffId) ? initialStaffId : null); // null = cualquiera
+  const [step, setStep] = useState<Step>(initialService ? (multiStaff && !initialTime && !(initialStaffId && staff.some((x) => x.id === initialStaffId)) ? "staff" : "time") : "service");
   const [month, setMonth] = useState((initialDay && initialDay >= today ? initialDay : today).slice(0, 7));
   const [slots, setSlots] = useState<Slot[] | null>(null);
   const [soon, setSoon] = useState<Slot[] | null>(null); // próximas 3 semanas, para los atajos
@@ -154,6 +162,20 @@ export default function BookingFlow({
   const [now, setNow] = useState(0);
   const [form, setForm] = useState({ name: "", phone: "", email: "", notes: initialColor ? `Color: ${initialColor}` : "", consent: false, website: "" });
   const [submitting, setSubmitting] = useState(false);
+  // Quien ya reservó desde este móvil no vuelve a escribir sus datos (el mismo perfil que usa «Cita fácil»)
+  useEffect(() => {
+    try {
+      const p = JSON.parse(localStorage.getItem("pd_profile") ?? "null") as { name?: string; phone?: string; staffId?: number } | null;
+      if (p?.name || p?.phone) setForm((f) => ({ ...f, name: f.name || p.name || "", phone: f.phone || p.phone || "" }));
+      const sid = Number((p as { staffId?: number } | null)?.staffId);
+      if (sid && staff.some((x) => x.id === sid)) setHabitual(sid);
+    } catch {
+      /* sin almacenamiento */
+    }
+  }, []);
+  const [habitual, setHabitual] = useState<number | null>(null); // profesional de siempre (recordada en este móvil)
+  const [otpAsk, setOtpAsk] = useState<{ devCode?: string } | null>(null); // el servidor pidió verificar el teléfono
+  const [otp, setOtp] = useState("");
   const [done, setDone] = useState<Done | null>(null);
   const [doneAll, setDoneAll] = useState<Done[]>([]);
   const [extras, setExtras] = useState<Service[]>(() =>
@@ -192,6 +214,17 @@ export default function BookingFlow({
   const availServices = apart ? (cur ? [cur.service] : []) : visitServices;
   const curAddonIds = apart ? cur?.addons ?? [] : addonsT;
   // clave de lo que se consulta: servicios | extras
+  // Medición anónima del embudo (nunca datos personales)
+  const slugsKey = availServices.map((x) => x.slug).join(",");
+  useEffect(() => {
+    if (slugsKey && (step === "time" || step === "staff")) track("service", { flow: "full", services: slugsKey.split(",") });
+  }, [slugsKey, step]);
+  useEffect(() => {
+    if (slugsKey && step === "time" && slots && slots.some((x) => x.available)) track("slots", { flow: "full", services: slugsKey.split(",") });
+  }, [slugsKey, step, slots]);
+  useEffect(() => {
+    if (step === "details") track("details", { flow: "full", services: slugsKey.split(",") });
+  }, [step, slugsKey]);
   const availKey = availServices.length ? `${availServices.map((x) => x.id).join(",")}|${curAddonIds.join(",")}` : "";
   const allAddonIds = apart ? legs.flatMap((l) => l.addons) : addonsT;
   const addonObjs = allAddonIds.map((id) => addons.find((a) => a.id === id)).filter((a): a is Addon => !!a);
@@ -328,6 +361,8 @@ export default function BookingFlow({
   useEffect(() => {
     allHoldsRef.current = allHolds;
   }, [allHolds]);
+  const leadHold = apart ? legs.find((l) => l.hold)?.hold : holdT;
+  useLeadCapture({ holdId: step === "details" ? leadHold?.holdId : undefined, holdToken: leadHold?.holdToken, phone: form.phone, name: form.name, flow: "full" });
   const allHeld = apart ? legs.length > 0 && legs.every((l) => !!l.hold) : !!holdT;
 
   const release = useCallback((h: Hold) => {
@@ -400,6 +435,7 @@ export default function BookingFlow({
         body: JSON.stringify({
           serviceIds: availServices.map((x) => x.id),
           staffId: staffChoice,
+          ...(staffChoice === null && habitual ? { preferStaffId: habitual } : {}),
           startsAt: slot.startsAt,
           ...(curAddonIds.length ? { addonIds: curAddonIds } : {}),
           ...(matchedPack ? { packageSlug: matchedPack.slug } : {}),
@@ -412,6 +448,7 @@ export default function BookingFlow({
         setNotice({ tone: "error", text: errText(j?.error?.code, T.couldNotHold, j?.error?.message) });
         await refresh();
       } else {
+        track("hold", { flow: "full", services: availServices.map((x) => x.slug), once: false });
         const deadlineNew = Date.now() + j.expiresInSec * 1000;
         const next: Hold = {
           holdId: j.holdId,
@@ -764,7 +801,16 @@ export default function BookingFlow({
     if (submitting || !allHeld || !allAcked) return;
     setSubmitting(true);
     setNotice(null);
-    const who = { name: form.name, phone: form.phone, email: form.email, notes: composeNotes(), website: form.website, ...(kinds.length ? { acks: [...kinds] } : {}) };
+    const who = {
+      name: form.name,
+      phone: form.phone,
+      email: form.email,
+      notes: composeNotes(),
+      website: form.website,
+      ...(kinds.length ? { acks: [...kinds] } : {}),
+      ...(otpAsk && otp.length === 6 ? { otp } : {}),
+      attr: { ...attribution(), flow: "full" },
+    };
     try {
       const r = await fetch(apart ? "/api/bookings/batch" : "/api/bookings", {
         method: "POST",
@@ -778,6 +824,13 @@ export default function BookingFlow({
       const j = await r.json();
       if (!r.ok) {
         const code = j?.error?.code as string | undefined;
+        if (code === "VERIFY") {
+          // El teléfono es nuevo: se pide el código que acaba de llegar (los huecos siguen guardados)
+          setOtpAsk({ devCode: j?.error?.data?.devCode as string | undefined });
+          if (j?.error?.data?.wrong) setOtp("");
+          setNotice({ tone: "info", text: j?.error?.message ?? "Escribe el código que te hemos enviado." });
+          return;
+        }
         setNotice({ tone: "error", text: errText(code, T.couldNotConfirm, j?.error?.message) });
         if (code === "SLOT_TAKEN" || code === "HOLD_EXPIRED" || code === "NOT_FOUND") {
           // una de las horas ya no vale: se liberan todas (el servidor no dice cuál) y se vuelve a elegir
@@ -800,6 +853,11 @@ export default function BookingFlow({
       for (const b of list) {
         saveBooking(b.code, b.token);
         saveVisitHistory({ startsAt: b.startsAt, slugs: services.filter((s) => b.serviceName.includes(s.name)).map((s) => s.slug), color: colorFromNotes(form.notes) });
+      }
+      try {
+        localStorage.setItem("pd_profile", JSON.stringify({ name: form.name, phone: form.phone, staffId: (list[0] as { staffId?: number }).staffId ?? habitual ?? undefined, slug: availServices[0]?.slug ?? "", serviceName: list[0].serviceName, slugs: services.filter((x) => list[0].serviceName.includes(x.name)).map((x) => x.slug) }));
+      } catch {
+        /* nada */
       }
       allHoldsRef.current = [];
       holdRef.current = null;
@@ -1058,7 +1116,7 @@ export default function BookingFlow({
                               <strong>{L(s).name}</strong>
                               {L(s).description && <small>{L(s).description}</small>}
                             </span>
-                            <span className="pick__meta">{fmtDuration(s.durationMin)}</span>
+                            <span className="pick__meta">{fmtDuration(s.durationMin)}{s.waitMin ? ` · incluye ${s.waitMin} min de pose` : ""}</span>
                             <span className="pick__price">{money(s.priceCents)}</span>
                           </button>
                         </li>
@@ -1075,6 +1133,17 @@ export default function BookingFlow({
                 <button type="button" className="back" onClick={back}><ArrowLeft size={16} aria-hidden="true" /> {T.changeService}</button>
                 <h2 className="panel__title">{T.withWho}</h2>
                 <ul className="pick-list">
+                  {habitual && staff.find((x) => x.id === habitual) && (
+                    <li>
+                      <button type="button" className={`pick pick--star ${staffChoice === habitual ? "is-on" : ""}`} onClick={() => chooseStaff(habitual)}>
+                        <span className="pick__main">
+                          <strong>Con {staff.find((x) => x.id === habitual)!.name}, como siempre</strong>
+                          <small>Tu profesional de la última vez</small>
+                        </span>
+                        <Sparkles size={18} aria-hidden="true" />
+                      </button>
+                    </li>
+                  )}
                   <li>
                     <button type="button" className={`pick ${staffChoice === null ? "is-on" : ""}`} onClick={() => chooseStaff(null)}>
                       <span className="pick__main">
@@ -1084,7 +1153,7 @@ export default function BookingFlow({
                       <Sparkles size={18} aria-hidden="true" />
                     </button>
                   </li>
-                  {staff.map((s) => (
+                  {staff.filter((s) => s.id !== habitual).map((s) => (
                     <li key={s.id}>
                       <button type="button" className={`pick ${staffChoice === s.id ? "is-on" : ""}`} onClick={() => chooseStaff(s.id)}>
                         <span className="pick__main"><strong>{s.name}</strong></span>
@@ -1104,7 +1173,7 @@ export default function BookingFlow({
                 <h2 className="panel__title">{apart && cur ? t("chooseSlotFor", { name: L(cur.service).name }) : T.chooseSlot}</h2>
 
                 <div className="visit">
-                  <p className="visit__title">{T.yourVisit}: <b>{fmtDuration(totalDuration)}</b> · <b>{money(totalPrice)}</b></p>
+                  <p className="visit__title">{T.yourVisit}: <b>{fmtDuration(totalDuration)}</b>{visitServices.some((x) => x.waitMin) ? ` (incluye ${visitServices.reduce((a, x) => a + (x.waitMin ?? 0), 0)} min de pose)` : ""} · <b>{money(totalPrice)}</b></p>
                   {matchedPack && (
                     <p className="visit__pack">{matchedPack.emoji} {packSaving > 0 ? t("packSavedLine", { name: L(matchedPack).name, amount: money(packSaving) }) : t("packBadge", { name: L(matchedPack).name })}</p>
                   )}
@@ -1298,6 +1367,13 @@ export default function BookingFlow({
                   {slots !== null && Object.keys(dayInfo).length === 0 && (
                     <div className="empty">
                       <p className="muted">{t("noSlotsMonth", { month: fmtMonth(month, locale) })}</p>
+                      {staffChoice !== null && (
+                        <p>
+                          <button type="button" className="btn btn--primary btn--sm" onClick={() => chooseStaff(null)}>
+                            Ver huecos con cualquier profesional
+                          </button>
+                        </p>
+                      )}
                       {canNext && (
                         <button type="button" className="btn btn--ghost btn--sm" onClick={() => shiftMonth(1)}>
                           {t("seeMonth", { month: nextMonthLabel })} <ChevronRight size={16} aria-hidden="true" />
@@ -1401,8 +1477,10 @@ export default function BookingFlow({
                   </label>
                   <label className="field">
                     <span>{T.phone}</span>
-                    <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="600 123 456" />
+                    <input required type="tel" inputMode="tel" autoComplete="tel" value={form.phone} onChange={(e) => { setOtpAsk(null); setOtp(""); setForm({ ...form, phone: e.target.value }); }} placeholder="600 123 456" />
+                    <small className="muted">Te guardamos el hueco. Si no terminas, te escribimos una sola vez por si quieres retomarlo.</small>
                   </label>
+                  {otpAsk && <OtpField value={otp} onChange={setOtp} devCode={otpAsk.devCode} phone={form.phone} />}
                   <label className="field">
                     <span>{T.email} <em>{T.optionalConfirmation}</em></span>
                     <input type="email" autoComplete="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
@@ -1441,7 +1519,7 @@ export default function BookingFlow({
                   )}
                   {showPolicyNote && <p className="notice notice--info">{T.depositPolicyNote}</p>}
                   <button type="submit" className="btn btn--primary btn--lg btn--block" disabled={submitting || !allAcked}>
-                    {submitting ? (needsDeposit ? T.openingPay : T.confirming) : needsDeposit ? t("payAndConfirm", { amount: money(depositKnown) }) : apart ? t("confirmMany", { n: legs.length }) : T.confirm}
+                    {submitting ? (needsDeposit ? T.openingPay : T.confirming) : otpAsk ? "Verificar y confirmar" : needsDeposit ? t("payAndConfirm", { amount: money(depositKnown) }) : apart ? t("confirmMany", { n: legs.length }) : T.confirm}
                   </button>
                 </form>
               </>

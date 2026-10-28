@@ -1,5 +1,6 @@
 import { run, type Runner } from "./db";
 import { BookingError } from "./errors";
+import { buildPattern, type Pattern, type Phase, type ResourceReq } from "./blocks";
 
 /** Servicios en un solo bloque (con acompañante puede haber varios) y citas separadas como máximo. */
 export const MAX_SERVICES = 6;
@@ -17,6 +18,9 @@ export type VisitItem = {
   bufferMin: number;
   stepMin: number;
   consentKind: string | null;
+  /** Fases (actúa/espera) y recursos del servicio; vacío = un bloque simple. */
+  phases: Phase[];
+  resources: ResourceReq[];
 };
 
 /** Extra que suma tiempo y precio (retirada de esmalte, nail art…). */
@@ -32,6 +36,8 @@ export type Visit = {
   depositCents: number;
   bufferMin: number; // limpieza tras el último servicio
   stepMin: number; // el paso más fino de los servicios elegidos
+  /** De qué tramos se compone y qué recursos usa (ver blocks.ts). */
+  pattern: Pattern;
 };
 
 type Row = {
@@ -63,6 +69,8 @@ export async function loadVisit(serviceIds: number[], q: Runner = run, addonIds:
   )) as unknown as Row[];
   if (rows.length !== distinct.length) throw new BookingError("NOT_FOUND", "Alguno de los servicios ya no está disponible.", 404);
 
+  const phaseRows = (await q(`SELECT service_id, kind, minutes FROM service_phases WHERE service_id = ANY($1::int[]) ORDER BY service_id, position`, [distinct])) as unknown as { service_id: number; kind: "active" | "wait"; minutes: number }[];
+  const resRows = (await q(`SELECT service_id, kind, uses FROM service_resources WHERE service_id = ANY($1::int[]) ORDER BY service_id, kind`, [distinct])) as unknown as { service_id: number; kind: string; uses: "all" | "active" }[];
   const byId = new Map(rows.map((r) => [r.id, r]));
   const items: VisitItem[] = ids.map((id) => {
     const r = byId.get(id)!;
@@ -78,6 +86,8 @@ export async function loadVisit(serviceIds: number[], q: Runner = run, addonIds:
       bufferMin: r.buffer_min,
       stepMin: r.step_min,
       consentKind: r.consent_kind,
+      phases: phaseRows.filter((x) => x.service_id === id).map((x) => ({ kind: x.kind, minutes: x.minutes })),
+      resources: resRows.filter((x) => x.service_id === id).map((x) => ({ kind: x.kind, uses: x.uses })),
     };
   });
 
@@ -97,7 +107,10 @@ export async function loadVisit(serviceIds: number[], q: Runner = run, addonIds:
     });
   }
 
+  const addonMin = addons.reduce((a, x) => a + x.durationMin, 0);
+  const bufferMin = items[items.length - 1].bufferMin;
   return {
+    pattern: buildPattern(items, addonMin, bufferMin),
     items,
     addons,
     name: items.map((i) => i.name).join(" + "),

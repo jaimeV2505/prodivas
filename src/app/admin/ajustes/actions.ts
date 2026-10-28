@@ -3,15 +3,19 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { isAdmin } from "@/lib/auth";
+import { audit } from "@/lib/audit";
+import { isAdmin, revokeAllSessions } from "@/lib/auth";
 import { query } from "@/lib/db";
 import { CONSENT_KINDS } from "@/lib/consent";
+import { formatPhases, parsePhases, type Phase } from "@/lib/blocks";
 import { isDay } from "@/lib/dates";
 import { enabled, sendEmail, sendSms, sendTelegram, sendWhatsAppTemplate, type SendResult } from "@/lib/messaging";
 
-async function guard() {
+async function guard(action?: string) {
   if (!(await isAdmin())) redirect("/admin");
+  if (action && !READ_ONLY.has(action)) await audit(action);
 }
+const READ_ONLY = new Set<string>([]);
 const str = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
 const done = (msg: string) => redirect(`/admin/ajustes?ok=${encodeURIComponent(msg)}`);
 const fail = (msg: string) => redirect(`/admin/ajustes?err=${encodeURIComponent(msg)}`);
@@ -60,8 +64,36 @@ function parseService(fd: FormData) {
   return r.data!;
 }
 
+/** Fases de pose y recurso de un servicio, tal como las escribe la dueña. Valida que las fases sumen la duración. */
+function parsePose(fd: FormData, duration: number): { phases: Phase[]; resKind: string | null; resUses: "all" | "active" } {
+  const raw = str(fd, "phases");
+  let phases: Phase[] = [];
+  if (raw) {
+    const p = parsePhases(raw);
+    if (!p || !p.length) fail("Las fases se escriben así: «30 + 45e + 30» (los minutos; la «e» marca los de espera)");
+    const sum = p!.reduce((a, x) => a + x.minutes, 0);
+    if (sum !== duration) fail(`Las fases suman ${sum} min y el servicio dura ${duration} min: tienen que coincidir`);
+    if (!p!.some((x) => x.kind === "active")) fail("Tiene que haber al menos una fase en la que la profesional actúe");
+    // una sola fase de actuar = servicio normal: no se guarda
+    phases = p!.some((x) => x.kind === "wait") ? p! : [];
+  }
+  const k = z.string().trim().toLowerCase().max(40, "El tipo de recurso es muy largo").safeParse(str(fd, "res_kind"));
+  if (!k.success) fail(k.error.issues[0]?.message ?? "Revisa el recurso");
+  const uses = z.enum(["all", "active"]).safeParse(str(fd, "res_uses") || "all");
+  return { phases, resKind: k.data! || null, resUses: uses.success ? uses.data : "all" };
+}
+
+async function savePose(serviceId: number, pose: ReturnType<typeof parsePose>) {
+  await query(`DELETE FROM service_phases WHERE service_id = $1::int`, [serviceId]);
+  for (let i = 0; i < pose.phases.length; i++) {
+    await query(`INSERT INTO service_phases (service_id, position, kind, minutes) VALUES ($1::int, $2::int, $3, $4::int)`, [serviceId, i, pose.phases[i].kind, pose.phases[i].minutes]);
+  }
+  await query(`DELETE FROM service_resources WHERE service_id = $1::int`, [serviceId]);
+  if (pose.resKind) await query(`INSERT INTO service_resources (service_id, kind, uses) VALUES ($1::int, $2, $3)`, [serviceId, pose.resKind, pose.resUses]);
+}
+
 export async function saveModeAction(fd: FormData) {
-  await guard();
+  await guard("saveModeAction");
   const mode = z.enum(["smart", "compact", "flex"]).safeParse(str(fd, "mode"));
   if (!mode.success) fail("Modo no válido");
   await query(`INSERT INTO settings (key, value) VALUES ('slot_mode', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [mode.data!]);
@@ -70,22 +102,25 @@ export async function saveModeAction(fd: FormData) {
 }
 
 export async function saveServiceAction(fd: FormData) {
-  await guard();
+  await guard("saveServiceAction");
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   const s = parseService(fd);
+  const pose = parsePose(fd, s.duration);
   await query(
     `UPDATE services SET name = $2, category = $3, duration_min = $4, price_cents = $5, slot_step_min = $6, sort = $7, active = $8,
                          buffer_min = $9, deposit_cents = LEAST($10::int, $5::int),
                          rebook_weeks = $11::int, consent_kind = $12, deposit_always = $13, cancel_notice_hours = $14::int, aftercare = NULLIF($15, '') WHERE id = $1::int`,
     [id, s.name, s.category, s.duration, s.price, s.step, s.sort, fd.get("active") === "on", s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on", s.notice, s.aftercare],
   );
+  await savePose(id, pose);
   revalidatePath("/admin/ajustes");
   done(`Guardado: ${s.name}`);
 }
 
 export async function addServiceAction(fd: FormData) {
-  await guard();
+  await guard("addServiceAction");
   const s = parseService(fd);
+  const pose = parsePose(fd, s.duration);
   const base = slugify(s.name);
   const taken = new Set((await query<{ slug: string }>(`SELECT slug FROM services WHERE slug LIKE $1`, [`${base}%`])).map((r) => r.slug));
   let slug = base;
@@ -95,6 +130,8 @@ export async function addServiceAction(fd: FormData) {
      VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, LEAST($9::int, $5::int), $10::int, $11, $12, $13::int)`,
     [slug, s.name, s.category, s.duration, s.price, s.step, s.sort, s.buffer, s.deposit, s.rebook, s.consent, fd.get("deposit_always") === "on", s.notice],
   );
+  const created = await query<{ id: number }>(`SELECT id FROM services WHERE slug = $1`, [slug]);
+  if (created[0]) await savePose(created[0].id, pose);
   revalidatePath("/admin/ajustes");
   done(`Servicio creado: ${s.name}`);
 }
@@ -103,7 +140,7 @@ const hhmm = /^\d{2}:\d{2}$/;
 const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
 export async function saveHoursAction(fd: FormData) {
-  await guard();
+  await guard("saveHoursAction");
   const weekday = z.coerce.number().int().min(0).max(6).parse(str(fd, "weekday"));
   if (fd.get("closed") === "on") {
     await query(
@@ -139,7 +176,7 @@ export async function saveHoursAction(fd: FormData) {
 /* ---------- Profesionales y sus horarios ---------- */
 
 export async function addStaffAction(fd: FormData) {
-  await guard();
+  await guard("addStaffAction");
   const name = z.string().min(2, "Pon un nombre").max(60).safeParse(str(fd, "name"));
   if (!name.success) fail(name.error.issues[0]?.message ?? "Nombre no válido");
   await query(`INSERT INTO staff (name, sort) VALUES ($1, COALESCE((SELECT max(sort) + 1 FROM staff), 1))`, [name.data!]);
@@ -148,7 +185,7 @@ export async function addStaffAction(fd: FormData) {
 }
 
 export async function saveStaffAction(fd: FormData) {
-  await guard();
+  await guard("saveStaffAction");
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   const name = z.string().min(2).max(60).safeParse(str(fd, "name"));
   if (!name.success) fail("Pon un nombre");
@@ -163,7 +200,7 @@ export async function saveStaffAction(fd: FormData) {
 }
 
 export async function saveStaffHoursAction(fd: FormData) {
-  await guard();
+  await guard("saveStaffHoursAction");
   const staffId = z.coerce.number().int().positive().parse(str(fd, "staffId"));
   const weekday = z.coerce.number().int().min(0).max(6).parse(str(fd, "weekday"));
   if (fd.get("closed") === "on") {
@@ -196,7 +233,7 @@ export async function saveStaffHoursAction(fd: FormData) {
 }
 
 export async function clearStaffHoursAction(fd: FormData) {
-  await guard();
+  await guard("clearStaffHoursAction");
   const staffId = z.coerce.number().int().positive().parse(str(fd, "staffId"));
   await query(`DELETE FROM staff_hours WHERE staff_id = $1::int`, [staffId]);
   revalidatePath("/admin/ajustes");
@@ -206,7 +243,7 @@ export async function clearStaffHoursAction(fd: FormData) {
 /* ---------- Probar los canales de aviso ---------- */
 
 export async function testChannelAction(fd: FormData) {
-  await guard();
+  await guard("testChannelAction");
   const channel = z.enum(["telegram", "email", "sms", "whatsapp"]).parse(str(fd, "channel"));
   const phone = str(fd, "phone");
   const text = "Prueba de Pro Diva: si lees esto, este canal funciona.";
@@ -266,14 +303,14 @@ const afterTrend = (msg: string) => {
 };
 
 export async function addTrendAction(fd: FormData) {
-  await guard();
+  await guard("addTrendAction");
   const t = await parseTrend(fd);
   await query(`INSERT INTO trends (emoji, title, body, topic, service_slug, sort) VALUES ($1, $2, $3, $4, $5, $6::int)`, [t.emoji, t.title, t.body, t.topic, t.serviceSlug, t.sort]);
   afterTrend("Tendencia añadida");
 }
 
 export async function saveTrendAction(fd: FormData) {
-  await guard();
+  await guard("saveTrendAction");
   const id = Number(str(fd, "id"));
   if (!Number.isInteger(id)) fail("Tendencia no válida");
   const t = await parseTrend(fd);
@@ -285,7 +322,7 @@ export async function saveTrendAction(fd: FormData) {
 }
 
 export async function deleteTrendAction(fd: FormData) {
-  await guard();
+  await guard("deleteTrendAction");
   const id = Number(str(fd, "id"));
   if (Number.isInteger(id)) await query(`DELETE FROM trends WHERE id = $1::int`, [id]);
   afterTrend("Tendencia borrada");
@@ -293,7 +330,7 @@ export async function deleteTrendAction(fd: FormData) {
 
 /* ---------- Señal inteligente ---------- */
 export async function saveDepositPolicyAction(fd: FormData) {
-  await guard();
+  await guard("saveDepositPolicyAction");
   const r = z
     .object({
       policy: z.enum(["service", "repeat"]),
@@ -342,7 +379,7 @@ const afterCatalog = (msg: string) => {
   done(msg);
 };
 export async function addPackAction(fd: FormData) {
-  await guard();
+  await guard("addPackAction");
   const p = await parsePack(fd);
   const base = slugify(p.name);
   const taken = new Set((await query<{ slug: string }>(`SELECT slug FROM packages WHERE slug LIKE $1`, [`${base}%`])).map((r) => r.slug));
@@ -352,7 +389,7 @@ export async function addPackAction(fd: FormData) {
   afterCatalog(`Pack creado: ${p.name}`);
 }
 export async function savePackAction(fd: FormData) {
-  await guard();
+  await guard("savePackAction");
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   const p = await parsePack(fd);
   await query(
@@ -363,7 +400,7 @@ export async function savePackAction(fd: FormData) {
   afterCatalog(`Pack guardado: ${p.name}`);
 }
 export async function deletePackAction(fd: FormData) {
-  await guard();
+  await guard("deletePackAction");
   const id = Number(str(fd, "id"));
   if (Number.isInteger(id)) await query(`DELETE FROM packages WHERE id = $1::int`, [id]);
   afterCatalog("Pack borrado");
@@ -385,7 +422,7 @@ function parseAddon(fd: FormData) {
   return r.data!;
 }
 export async function addAddonAction(fd: FormData) {
-  await guard();
+  await guard("addAddonAction");
   const a = parseAddon(fd);
   const base = slugify(a.name);
   const taken = new Set((await query<{ slug: string }>(`SELECT slug FROM addons WHERE slug LIKE $1`, [`${base}%`])).map((r) => r.slug));
@@ -395,7 +432,7 @@ export async function addAddonAction(fd: FormData) {
   afterCatalog(`Extra creado: ${a.name}`);
 }
 export async function saveAddonAction(fd: FormData) {
-  await guard();
+  await guard("saveAddonAction");
   const id = z.coerce.number().int().positive().parse(str(fd, "id"));
   const a = parseAddon(fd);
   await query(
@@ -405,7 +442,7 @@ export async function saveAddonAction(fd: FormData) {
   afterCatalog(`Extra guardado: ${a.name}`);
 }
 export async function deleteAddonAction(fd: FormData) {
-  await guard();
+  await guard("deleteAddonAction");
   const id = Number(str(fd, "id"));
   if (Number.isInteger(id)) await query(`DELETE FROM addons WHERE id = $1::int`, [id]);
   afterCatalog("Extra borrado");
@@ -413,7 +450,7 @@ export async function deleteAddonAction(fd: FormData) {
 
 /* ---------- Fidelidad (sellos) ---------- */
 export async function saveLoyaltyAction(fd: FormData) {
-  await guard();
+  await guard("saveLoyaltyAction");
   const r = z
     .object({
       every: z.coerce.number().int().min(2, "Mínimo 2 visitas").max(50, "Máximo 50 visitas"),
@@ -427,4 +464,71 @@ export async function saveLoyaltyAction(fd: FormData) {
   }
   revalidatePath("/admin/ajustes");
   done("Programa de fidelidad guardado");
+}
+
+const put = (k: string, v: string) => query(`INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, [k, v]);
+
+export async function saveGrowthAction(fd: FormData) {
+  await guard("saveGrowthAction");
+  const r = z
+    .object({
+      days: z.coerce.number().int().min(0).max(365),
+      reward: z.string().trim().min(3, "Escribe cuál es el premio de «trae a una amiga»").max(80),
+    })
+    .safeParse({ days: str(fd, "reactivation_days") || "0", reward: str(fd, "referral_reward") });
+  if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa los datos");
+  if (r.data!.days !== 0 && r.data!.days < 14) fail("Para «te echamos de menos» pon al menos 14 días (o 0 para desactivarlo)");
+  await put("auto_showed", fd.get("auto_showed") === "on" ? "on" : "off");
+  await put("abandon_recovery", fd.get("abandon_recovery") === "on" ? "on" : "off");
+  await put("reactivation_days", String(r.data!.days));
+  await put("referral_enabled", fd.get("referral_enabled") === "on" ? "on" : "off");
+  await put("referral_reward", r.data!.reward);
+  revalidatePath("/admin/ajustes");
+  done("Automatizaciones guardadas");
+}
+
+/** Qué servicios hace cada profesional. Sin ninguno marcado = hace todos. */
+export async function saveStaffSkillsAction(fd: FormData) {
+  await guard("saveStaffSkillsAction");
+  const id = z.coerce.number().int().positive().parse(str(fd, "staffId"));
+  const ids = fd.getAll("svc").map((x) => Number(x)).filter((n) => Number.isInteger(n) && n > 0);
+  await query(`DELETE FROM staff_services WHERE staff_id = $1::int`, [id]);
+  if (ids.length) await query(`INSERT INTO staff_services (staff_id, service_id) SELECT $1::int, s.id FROM services s WHERE s.id = ANY($2::int[])`, [id, ids]);
+  revalidatePath("/admin/ajustes");
+  done(ids.length ? "Habilidades guardadas" : "Hace todos los servicios");
+}
+
+export async function revokeSessionsAction() {
+  await guard();
+  await revokeAllSessions();
+  redirect("/admin");
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Recursos compartidos (cabinas, máquinas, lavacabezas…)              */
+/* ------------------------------------------------------------------ */
+
+const ResourceSchema = z.object({
+  name: z.string().trim().min(2, "Pon un nombre a la unidad").max(60),
+  kind: z.string().trim().toLowerCase().min(2, "Pon el tipo de recurso (p. ej. láser, lavacabezas)").max(40),
+});
+
+export async function addResourceAction(fd: FormData) {
+  await guard("addResourceAction");
+  const r = ResourceSchema.safeParse({ name: str(fd, "name"), kind: str(fd, "kind") });
+  if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa la unidad");
+  await query(`INSERT INTO resources (name, kind, sort) VALUES ($1, $2, COALESCE((SELECT max(sort) + 1 FROM resources), 1))`, [r.data!.name, r.data!.kind]);
+  revalidatePath("/admin/ajustes");
+  done(`Unidad añadida: ${r.data!.name}`);
+}
+
+export async function saveResourceAction(fd: FormData) {
+  await guard("saveResourceAction");
+  const id = z.coerce.number().int().positive().parse(str(fd, "id"));
+  const r = ResourceSchema.safeParse({ name: str(fd, "name"), kind: str(fd, "kind") });
+  if (!r.success) fail(r.error.issues[0]?.message ?? "Revisa la unidad");
+  await query(`UPDATE resources SET name = $2, kind = $3, active = $4 WHERE id = $1::int`, [id, r.data!.name, r.data!.kind, fd.get("active") === "on"]);
+  revalidatePath("/admin/ajustes");
+  done("Unidad guardada");
 }

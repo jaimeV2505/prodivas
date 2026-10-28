@@ -66,6 +66,18 @@ export const msgEs = {
   rtButton: "Reservar mi retoque",
   optoutLine: "Si no quieres más mensajes como este, entra aquí: {link}",
   optoutSms: "BAJA: {link}",
+  // reserva sin terminar (se escribe una sola vez)
+  abSms: "Pro Diva: {name}, tu hueco de {service} ({when}) puede seguir libre. Termina tu reserva aqui: {link}",
+  abSubject: "Tu reserva en {salon} sigue pendiente",
+  abTitle: "Tu hueco sigue esperándote",
+  abBody: "Hola {name}, dejaste a medias la reserva de {service} ({when}). Todavía puede haber hueco: termínala en un minuto.",
+  abButton: "Terminar mi reserva",
+  // te echamos de menos
+  missSms: "Pro Diva: {name}, hace tiempo que no te vemos. Quieres que te reservemos {service}? Mira los huecos: {link}",
+  missSubject: "Te echamos de menos en {salon}",
+  missTitle: "¡Te echamos de menos!",
+  missBody: "Hola {name}, hace {weeks} semanas que no vienes. ¿Te reservamos {service}? Hay huecos esta semana.",
+  missButton: "Ver huecos libres",
   // respuestas de WhatsApp
   replyConfirmed: "¡Perfecto! Te esperamos {words}. Gracias por confirmar.",
   replyCancelled: "Cita cancelada. Gracias por avisar. Cuando quieras otra, pídela en nuestra web o llámanos.",
